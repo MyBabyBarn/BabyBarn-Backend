@@ -24,6 +24,8 @@ import {
   scanRelaySchema,
   scanReturnSchema,
   scanSessionJoinParamsSchema,
+  scanPairJoinSchema,
+  scanPairRelaySchema,
   scanVerifySchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
@@ -263,7 +265,8 @@ export class InventoryController {
     const params = await validate(scanSessionJoinParamsSchema, {
       code: String(req.params.code || '').trim(),
     });
-    const data = scanRelayService.joinScanSession(params.code);
+    const pairingToken = req.body?.pairingToken ? String(req.body.pairingToken) : undefined;
+    const data = scanRelayService.joinScanSession(params.code, pairingToken);
     res.status(200).json({ success: true, data });
   }
 
@@ -271,7 +274,37 @@ export class InventoryController {
     const params = await validate(scanSessionJoinParamsSchema, {
       code: String(req.params.code || '').trim(),
     });
-    const data = scanRelayService.getScanSession(params.code);
+    const pairingToken = req.query?.pairingToken ? String(req.query.pairingToken) : undefined;
+    const data = scanRelayService.getScanSession(params.code, pairingToken);
+    res.status(200).json({ success: true, data });
+  }
+
+  /** Login-free phone join (pairing token). */
+  async pairJoinScanSession(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const body = await validate(scanPairJoinSchema, req.body ?? {});
+    const data = scanRelayService.joinScanSession(params.code, body.pairingToken);
+    res.status(200).json({ success: true, data });
+  }
+
+  /** Login-free phone status (pairing token). */
+  async pairGetScanSession(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const body = await validate(scanPairJoinSchema, {
+      pairingToken: String(req.query.pairingToken || ''),
+    });
+    const data = scanRelayService.getScanSession(params.code, body.pairingToken);
+    res.status(200).json({ success: true, data });
+  }
+
+  /** Login-free phone relay (pairing token). */
+  async pairScanRelay(req, res) {
+    const body = await validate(scanPairRelaySchema, req.body ?? {});
+    const data = scanRelayService.relayScanToSession(body.sessionCode, body.code, { email: 'phone-scanner' }, body.pairingToken);
     res.status(200).json({ success: true, data });
   }
 
@@ -296,7 +329,12 @@ export class InventoryController {
 
   async scanRelay(req, res) {
     const body = await validate(scanRelaySchema, req.body ?? {});
-    const data = scanRelayService.relayScanToSession(body.sessionCode, body.code, this.actor(req));
+    const data = scanRelayService.relayScanToSession(
+      body.sessionCode,
+      body.code,
+      this.actor(req),
+      body.pairingToken
+    );
     res.status(200).json({ success: true, data });
   }
 

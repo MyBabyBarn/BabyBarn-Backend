@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import QRCode from 'qrcode';
 import { AppError } from '../utils/error-handler.js';
 
@@ -8,7 +8,19 @@ const MAX_RECENT = 20;
 /** @type {Map<string, ScanSession>} */
 const sessions = new Map();
 
-/** @typedef {{ id: string, code: string, createdBy: string, createdAt: number, expiresAt: number, scannerJoined: boolean, recentScans: Array<{ code: string, at: string, actorEmail?: string | null }>, subscribers: Set<(payload: object) => void> }} ScanSession */
+/**
+ * @typedef {{
+ *   id: string,
+ *   code: string,
+ *   pairingToken: string,
+ *   createdBy: string,
+ *   createdAt: number,
+ *   expiresAt: number,
+ *   scannerJoined: boolean,
+ *   recentScans: Array<{ code: string, at: string, actorEmail?: string | null }>,
+ *   subscribers: Set<(payload: object) => void>
+ * }} ScanSession
+ */
 
 function purgeExpired() {
   const now = Date.now();
@@ -39,6 +51,21 @@ function getSession(code) {
   return session;
 }
 
+function tokensMatch(expected, provided) {
+  const a = Buffer.from(String(expected || ''), 'utf8');
+  const b = Buffer.from(String(provided || ''), 'utf8');
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export function assertPairingToken(code, pairingToken) {
+  const session = getSession(code);
+  if (!tokensMatch(session.pairingToken, pairingToken)) {
+    throw new AppError(401, 'Invalid or expired pairing token', 'PAIRING_TOKEN_INVALID');
+  }
+  return session;
+}
+
 function broadcast(session, payload) {
   for (const send of session.subscribers) {
     try {
@@ -56,10 +83,12 @@ export function createScanSession(actor) {
     code = randomCode();
   }
   const now = Date.now();
+  const pairingToken = randomBytes(24).toString('base64url');
   /** @type {ScanSession} */
   const session = {
     id: randomBytes(8).toString('hex'),
     code,
+    pairingToken,
     createdBy: actor?.id ?? 'unknown',
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
@@ -68,15 +97,17 @@ export function createScanSession(actor) {
     subscribers: new Set(),
   };
   sessions.set(code, session);
+  const joinPath = `/warehouse/scanner?code=${encodeURIComponent(session.code)}&token=${encodeURIComponent(session.pairingToken)}`;
   return {
     code: session.code,
+    pairingToken: session.pairingToken,
     expiresAt: new Date(session.expiresAt).toISOString(),
-    joinPath: `/admin/inventory/scan?relay=${session.code}`,
+    joinPath,
   };
 }
 
-export function joinScanSession(code) {
-  const session = getSession(code);
+export function joinScanSession(code, pairingToken) {
+  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
   session.scannerJoined = true;
   broadcast(session, { type: 'scanner_joined', at: new Date().toISOString() });
   return {
@@ -86,15 +117,15 @@ export function joinScanSession(code) {
   };
 }
 
-export function relayScanToSession(code, scanCode, actor) {
-  const session = getSession(code);
+export function relayScanToSession(code, scanCode, actor, pairingToken) {
+  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
   const normalized = String(scanCode || '').trim();
   if (!normalized) throw new AppError(400, 'Scan code is required');
 
   const entry = {
     code: normalized,
     at: new Date().toISOString(),
-    actorEmail: actor?.email ?? null,
+    actorEmail: actor?.email ?? 'phone-scanner',
   };
   session.recentScans.unshift(entry);
   if (session.recentScans.length > MAX_RECENT) {
@@ -106,13 +137,13 @@ export function relayScanToSession(code, scanCode, actor) {
   return { relayed: true, ...entry };
 }
 
-export function getScanSession(code) {
-  const session = getSession(code);
+export function getScanSession(code, pairingToken) {
+  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
   return {
     code: session.code,
     expiresAt: new Date(session.expiresAt).toISOString(),
     scannerJoined: session.scannerJoined,
-    recentScans: session.recentScans,
+    recentScans: pairingToken ? [] : session.recentScans,
   };
 }
 
@@ -151,7 +182,7 @@ function reqOnClose(res, fn) {
 }
 
 export async function renderSessionJoinQr(code, joinUrl) {
-  const url = joinUrl || `/admin/inventory/scan?relay=${code}`;
+  const url = joinUrl || `/warehouse/scanner?code=${encodeURIComponent(code)}`;
   return QRCode.toBuffer(url, { type: 'png', margin: 1, width: 240 });
 }
 
@@ -162,4 +193,5 @@ export const scanRelayService = {
   getScanSession,
   subscribeScanSession,
   renderSessionJoinQr,
+  assertPairingToken,
 };

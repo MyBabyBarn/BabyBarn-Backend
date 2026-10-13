@@ -172,4 +172,15 @@ router.post('/scan/relay', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanRelay(req, res).catch(next)
 );
 
+/** Login-free phone scanner pairing (short-lived token from host session create). */
+router.post('/scan/pair/:code/join', (req, res, next) =>
+  inventoryController.pairJoinScanSession(req, res).catch(next)
+);
+router.get('/scan/pair/:code', (req, res, next) =>
+  inventoryController.pairGetScanSession(req, res).catch(next)
+);
+router.post('/scan/pair/relay', (req, res, next) =>
+  inventoryController.pairScanRelay(req, res).catch(next)
+);
+
 export default router;

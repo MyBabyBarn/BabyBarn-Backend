@@ -914,10 +914,21 @@ export const scanReturnSchema = z.object({
 export const scanRelaySchema = z.object({
   sessionCode: z.string().trim().min(4).max(8),
   code: z.string().trim().min(1).max(80),
+  pairingToken: z.string().trim().min(8).max(128).optional(),
 });
 
 export const scanSessionJoinParamsSchema = z.object({
   code: z.string().trim().min(4).max(8),
+});
+
+export const scanPairJoinSchema = z.object({
+  pairingToken: z.string().trim().min(8).max(128),
+});
+
+export const scanPairRelaySchema = z.object({
+  sessionCode: z.string().trim().min(4).max(8),
+  code: z.string().trim().min(1).max(80),
+  pairingToken: z.string().trim().min(8).max(128),
 });
 
 const shipAddressSchema = z.object({

@@ -91,6 +91,26 @@ function publishedWhere(now = new Date()) {
   };
 }
 
+/** Max featured articles on the storefront hero (and admin starring). */
+export const BLOG_FEATURED_LIMIT = 3;
+
+async function assertFeaturedSlotAvailable(excludePostId) {
+  const count = await prisma.blogPost.count({
+    where: {
+      deletedAt: null,
+      featured: true,
+      ...(excludePostId ? { id: { not: excludePostId } } : {}),
+    },
+  });
+  if (count >= BLOG_FEATURED_LIMIT) {
+    throw new AppError(
+      400,
+      `Only ${BLOG_FEATURED_LIMIT} featured articles are allowed. Unfeature another article first.`,
+      'FEATURED_LIMIT'
+    );
+  }
+}
+
 async function uniqueLiveSlug(base, ignoreId) {
   let slug = slugifyBlog(base);
   let n = 1;
@@ -131,6 +151,17 @@ async function resolveTagIds(publicIds) {
     throw new AppError(400, 'One or more tags were not found');
   }
   return rows.map((r) => r.id);
+}
+
+/** Persist body images as stable `/uploads/...` paths (not host-absolute). */
+function normalizeContentHtml(html) {
+  return String(html || '').replace(
+    /(<img\b[^>]*\bsrc=["'])([^"']+)(["'][^>]*>)/gi,
+    (_full, pre, src, post) => {
+      const match = String(src).replace(/\\/g, '/').match(/(\/uploads\/.+)$/i);
+      return `${pre}${match ? match[1] : src}${post}`;
+    }
+  );
 }
 
 function cleanText(value, max) {
@@ -248,16 +279,18 @@ export async function createPost(user, body) {
   const userId = await staffUserId(user);
   const categoryIds = await resolveCategoryIds(body.categoryIds || []);
   const tagIds = await resolveTagIds(body.tagIds || []);
+  const wantFeatured = Boolean(body.featured);
+  if (wantFeatured) await assertFeaturedSlotAvailable();
   const post = await prisma.blogPost.create({
     data: {
       slug,
       title,
       excerpt: cleanText(body.excerpt, 400) || '',
-      contentHtml: String(body.contentHtml || ''),
+      contentHtml: normalizeContentHtml(body.contentHtml || ''),
       featuredImageUrl: cleanText(body.featuredImageUrl, 500),
       featuredImageAlt: cleanText(body.featuredImageAlt, 180),
       authorName: cleanText(body.authorName, 120) || authorLabel(user) || 'Baby Barn',
-      featured: Boolean(body.featured),
+      featured: wantFeatured,
       seoTitle: cleanText(body.seoTitle, 70),
       metaDescription: cleanText(body.metaDescription, 180),
       ogTitle: cleanText(body.ogTitle, 90),
@@ -297,11 +330,15 @@ export async function updatePost(user, publicId, body) {
     updatedById: userId,
   };
   if (body.excerpt != null) data.excerpt = cleanText(body.excerpt, 400) || '';
-  if (body.contentHtml != null) data.contentHtml = String(body.contentHtml);
+  if (body.contentHtml != null) data.contentHtml = normalizeContentHtml(body.contentHtml);
   if (body.featuredImageUrl !== undefined) data.featuredImageUrl = cleanText(body.featuredImageUrl, 500);
   if (body.featuredImageAlt !== undefined) data.featuredImageAlt = cleanText(body.featuredImageAlt, 180);
   if (body.authorName != null) data.authorName = cleanText(body.authorName, 120) || 'Baby Barn';
-  if (body.featured != null) data.featured = Boolean(body.featured);
+  if (body.featured != null) {
+    const wantFeatured = Boolean(body.featured);
+    if (wantFeatured && !existing.featured) await assertFeaturedSlotAvailable(existing.id);
+    data.featured = wantFeatured;
+  }
   if (body.seoTitle !== undefined) data.seoTitle = cleanText(body.seoTitle, 70);
   if (body.metaDescription !== undefined) data.metaDescription = cleanText(body.metaDescription, 180);
   if (body.ogTitle !== undefined) data.ogTitle = cleanText(body.ogTitle, 90);
@@ -453,14 +490,16 @@ export async function schedulePost(user, publicId, scheduledAtRaw) {
 
 export async function setFeatured(user, publicId, featured) {
   const existing = await loadPost(publicId);
+  const wantFeatured = Boolean(featured);
+  if (wantFeatured && !existing.featured) await assertFeaturedSlotAvailable(existing.id);
   await prisma.blogPost.update({
     where: { id: existing.id },
-    data: { featured: Boolean(featured), updatedById: await staffUserId(user) },
+    data: { featured: wantFeatured, updatedById: await staffUserId(user) },
   });
   const fresh = await loadPost(publicId);
   await writeAdminAudit({
     ...actorOf(user),
-    action: featured ? 'BLOG_FEATURED' : 'BLOG_UNFEATURED',
+    action: wantFeatured ? 'BLOG_FEATURED' : 'BLOG_UNFEATURED',
     entityType: 'BlogPost',
     entityId: fresh.publicId,
     meta: { slug: fresh.slug },
@@ -640,45 +679,60 @@ export async function listPublicBlog({ search, category, tag, sort = 'latest', p
   if (category) where.categories = { some: { category: { slug: String(category) } } };
   if (tag) where.tags = { some: { tag: { slug: String(tag) } } };
   const unfiltered = !search && !category && !tag;
-  if (unfiltered) where.featured = false;
   const orderBy =
     sort === 'popular'
-      ? [{ featured: 'desc' }, { viewCount: 'desc' }, { publishedAt: 'desc' }]
-      : [{ featured: 'desc' }, { publishedAt: 'desc' }];
+      ? [{ viewCount: 'desc' }, { publishedAt: 'desc' }]
+      : [{ publishedAt: 'desc' }];
   const take = Math.min(24, Math.max(1, Number(limit) || 12));
   const currentPage = Math.max(1, Number(page) || 1);
-  const [rows, total, featured, popular, latest, categories, tags] = await Promise.all([
+
+  const featured = await prisma.blogPost.findMany({
+    where: { ...publishedWhere(now), featured: true },
+    include: POST_INCLUDE,
+    orderBy: [{ updatedAt: 'desc' }, { publishedAt: 'desc' }],
+    take: BLOG_FEATURED_LIMIT,
+  });
+
+  // Default /blog grid excludes hero featured so they are not duplicated under Latest.
+  if (unfiltered && featured.length) {
+    where.id = { notIn: featured.map((p) => p.id) };
+  }
+
+  const needsPopular = Boolean(category);
+  const [rows, total, popular, publishedTotal, categories, tags] = await Promise.all([
     prisma.blogPost.findMany({ where, include: POST_INCLUDE, orderBy, skip: (currentPage - 1) * take, take }),
     prisma.blogPost.count({ where }),
-    prisma.blogPost.findMany({
-      where: { ...publishedWhere(now), featured: true },
-      include: POST_INCLUDE,
-      orderBy: { publishedAt: 'desc' },
-      take: 4,
-    }),
-    prisma.blogPost.findMany({
-      where: publishedWhere(now),
-      include: POST_INCLUDE,
-      orderBy: [{ viewCount: 'desc' }, { publishedAt: 'desc' }],
-      take: 4,
-    }),
-    prisma.blogPost.findMany({
-      where: publishedWhere(now),
-      include: POST_INCLUDE,
-      orderBy: { publishedAt: 'desc' },
-      take: 4,
-    }),
+    needsPopular
+      ? prisma.blogPost.findMany({
+          where: publishedWhere(now),
+          include: POST_INCLUDE,
+          orderBy: [{ viewCount: 'desc' }, { publishedAt: 'desc' }],
+          take: 4,
+        })
+      : Promise.resolve([]),
+    unfiltered
+      ? prisma.blogPost.count({ where: publishedWhere(now) })
+      : Promise.resolve(null),
     prisma.blogCategory.findMany({ orderBy: { name: 'asc' }, include: { _count: { select: { posts: true } } } }),
     prisma.blogTag.findMany({ orderBy: { name: 'asc' }, include: { _count: { select: { posts: true } } } }),
   ]);
+
+  const articles = rows.map(toCard);
   return {
     featured: featured.map(toCard),
-    articles: rows.map(toCard),
+    articles,
     popular: popular.map(toCard),
-    latest: latest.map(toCard),
+    // Compat: clients that used `latest` for hero fallback can use articles.
+    latest: articles.slice(0, 4),
     categories: categories.map((row) => mapTaxonomy(row, 'category')),
     tags: tags.map((row) => mapTaxonomy(row, 'tag')),
-    pagination: { page: currentPage, limit: take, total, pages: Math.ceil(total / take) || 1 },
+    pagination: {
+      page: currentPage,
+      limit: take,
+      total,
+      pages: Math.ceil(total / take) || 1,
+      ...(publishedTotal != null ? { publishedTotal } : {}),
+    },
   };
 }
 
