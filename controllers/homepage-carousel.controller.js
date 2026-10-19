@@ -1,4 +1,5 @@
 import { config } from '../config/env.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 import {
   listAdminHomepageCarousel,
   getAdminHomepageCarouselSlide,
@@ -64,6 +65,7 @@ export const homepageCarouselController = {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image uploaded' });
     }
+    verifyUploadedImage(req.file);
     const path = `/uploads/marketing/${req.file.filename}`;
     const url = `${resolvePublicBaseUrl(req)}${path}`;
     // Prefer storing `path` (relative) in DB; `url` is for immediate admin preview.

@@ -18,6 +18,7 @@ import {
   updatePlatformReview,
 } from '../services/platform-review.service.js';
 import { validate } from '../utils/validation.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 import {
   createPlatformReviewSchema,
   createProductReviewSchema,
@@ -57,6 +58,7 @@ export const reviewController = {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Image file is required' });
     }
+    verifyUploadedImage(req.file);
     const path = `/uploads/reviews/${req.file.filename}`;
     res.status(201).json({ success: true, data: { path, url: path } });
   },

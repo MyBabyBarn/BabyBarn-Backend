@@ -1312,15 +1312,21 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     }
 
     const orderPublicId = session?.metadata?.orderPublicId;
-    if (!order && orderPublicId) {
+    // Only fulfill when Stripe confirms payment AND the order belongs to the caller.
+    // Never load/fulfill another user's order before ownership is verified.
+    if (
+      !order &&
+      orderPublicId &&
+      (session?.payment_status === 'paid' || session?.status === 'complete')
+    ) {
       order = await prisma.order.findUnique({
-        where: { publicId: orderPublicId },
+        where: { publicId: orderPublicId, userId: user.id },
         include: orderInclude,
       });
       if (order?.paymentStatus === 'UNPAID') {
         await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
         order = await prisma.order.findUnique({
-          where: { publicId: orderPublicId },
+          where: { publicId: orderPublicId, userId: user.id },
           include: orderInclude,
         });
       }

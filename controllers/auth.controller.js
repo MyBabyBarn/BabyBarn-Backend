@@ -15,6 +15,7 @@ import {
   addressUpdateSchema,
 } from '../schemas/index.js';
 import { verifyToken } from '../utils/jwt.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 
 export class AuthController {
   async register(req, res) {
@@ -121,6 +122,7 @@ export class AuthController {
         message: 'No image file received (use field name "image").',
       });
     }
+    verifyUploadedImage(file);
     const relative = `/uploads/avatars/${file.filename}`;
     const result = await authService.updateProfile(req.user.id, { avatarUrl: relative });
     res.status(201).json({

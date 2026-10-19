@@ -1,4 +1,5 @@
 import { config } from '../config/env.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 
 export class ProductUploadController {
   resolvePublicBaseUrl(req) {
@@ -22,6 +23,7 @@ export class ProductUploadController {
         message: 'No image file received (use field name "image").',
       });
     }
+    verifyUploadedImage(file);
 
     const relative = `/uploads/products/${file.filename}`;
     const url = `${this.resolvePublicBaseUrl(req)}${relative}`;

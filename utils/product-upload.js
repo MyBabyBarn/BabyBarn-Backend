@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import multer from 'multer';
+import { AppError } from './error-handler.js';
 
 const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
 const PRODUCTS_DIR = path.join(UPLOAD_ROOT, 'products');
@@ -22,8 +23,50 @@ export function ensureUploadDirs() {
 
 function fileFilter(_req, file, cb) {
   const ok = /^image\/(jpeg|png|webp)$/i.test(file.mimetype);
-  if (ok) cb(null, true);
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const extOk = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+  if (ok && extOk) cb(null, true);
   else cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+}
+
+/** Reject files whose magic bytes do not match an allowed image type. */
+export function assertImageMagicBytes(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(12);
+    const n = fs.readSync(fd, buf, 0, 12, 0);
+    if (n < 3) throw new AppError(400, 'Invalid image file');
+    const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    const isPng =
+      buf[0] === 0x89 &&
+      buf[1] === 0x50 &&
+      buf[2] === 0x4e &&
+      buf[3] === 0x47;
+    const isWebp =
+      buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP';
+    if (!isJpeg && !isPng && !isWebp) {
+      throw new AppError(400, 'File content is not a valid JPEG, PNG, or WebP image');
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Verify magic bytes for a multer file; delete the temp file on failure. */
+export function verifyUploadedImage(file) {
+  if (!file?.path) {
+    throw new AppError(400, 'No image file received');
+  }
+  try {
+    assertImageMagicBytes(file.path);
+  } catch (err) {
+    try {
+      fs.unlinkSync(file.path);
+    } catch {
+      /* ignore */
+    }
+    throw err instanceof AppError ? err : new AppError(400, 'Invalid image file');
+  }
 }
 
 /** Default product / return / avatar limit. */

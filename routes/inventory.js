@@ -100,6 +100,9 @@ router.post('/scan/resolve', ...barcodeStaff, (req, res, next) =>
 router.get('/scan/draft-sessions/active', ...barcodeStaff, (req, res, next) =>
   inventoryController.getActiveDraftSession(req, res).catch(next)
 );
+router.get('/scan/draft-sessions', ...barcodeStaff, (req, res, next) =>
+  inventoryController.listDraftSessions(req, res).catch(next)
+);
 router.get('/scan/draft-sessions/:id', ...barcodeStaff, (req, res, next) =>
   inventoryController.getDraftSession(req, res).catch(next)
 );
@@ -146,26 +149,30 @@ router.post('/scan/refurb', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanRefurb(req, res).catch(next)
 );
 
-function sseTokenAuth(req, res, next) {
-  if (!req.headers.authorization && req.query.token) {
-    req.headers.authorization = `Bearer ${String(req.query.token)}`;
-  }
-  next();
-}
-
 router.post('/scan/sessions', ...barcodeStaff, (req, res, next) =>
   inventoryController.createScanSession(req, res).catch(next)
 );
 router.post('/scan/sessions/:code/join', ...barcodeStaff, (req, res, next) =>
   inventoryController.joinScanSession(req, res).catch(next)
 );
+router.post('/scan/sessions/:code/approve', ...barcodeStaff, (req, res, next) =>
+  inventoryController.approveScanSessionJoin(req, res).catch(next)
+);
+router.post('/scan/sessions/:code/reject', ...barcodeStaff, (req, res, next) =>
+  inventoryController.rejectScanSessionJoin(req, res).catch(next)
+);
+router.post('/scan/sessions/:code/disconnect', ...barcodeStaff, (req, res, next) =>
+  inventoryController.disconnectScanSession(req, res).catch(next)
+);
 router.get('/scan/sessions/:code', ...barcodeStaff, (req, res, next) =>
   inventoryController.getScanSession(req, res).catch(next)
 );
-router.get('/scan/sessions/:code/qr', (req, res, next) =>
+/** QR requires staff auth + pairingToken (never public by session code alone). */
+router.get('/scan/sessions/:code/qr', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanSessionQr(req, res).catch(next)
 );
-router.get('/scan/sessions/:code/events', sseTokenAuth, ...barcodeStaff, (req, res, next) =>
+/** SSE auth via short-lived pairingToken query — not the long-lived access JWT. */
+router.get('/scan/sessions/:code/events', ...barcodeStaff, (req, res, next) =>
   inventoryController.scanSessionEvents(req, res).catch(next)
 );
 router.post('/scan/relay', ...barcodeStaff, (req, res, next) =>

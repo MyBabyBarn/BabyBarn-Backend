@@ -1816,7 +1816,14 @@ export class OrderService {
       data.shippingCarrier = String(payload.shippingCarrier).trim();
     }
     if (payload.shippingLabelUrl !== undefined) {
-      data.shippingLabelUrl = payload.shippingLabelUrl ? String(payload.shippingLabelUrl).trim() : null;
+      const raw = payload.shippingLabelUrl ? String(payload.shippingLabelUrl).trim() : null;
+      if (!raw) {
+        data.shippingLabelUrl = null;
+      } else if (/^\/uploads\/shipping-labels\/[A-Za-z0-9._-]+$/i.test(raw)) {
+        data.shippingLabelUrl = raw;
+      } else {
+        throw new AppError(400, 'Invalid shipping label URL');
+      }
     }
     if (payload.manualShippingNotes !== undefined) {
       data.manualShippingNotes = payload.manualShippingNotes
@@ -2096,9 +2103,13 @@ export class OrderService {
     );
     archive.pipe(res);
 
+    const labelsRoot = path.resolve(SHIPPING_LABELS_DIR);
     for (const o of orders) {
-      const rel = String(o.shippingLabelUrl || '').replace(/^\/uploads\/shipping-labels\//, '');
-      const abs = path.join(SHIPPING_LABELS_DIR, rel);
+      const url = String(o.shippingLabelUrl || '');
+      if (!/^\/uploads\/shipping-labels\/[A-Za-z0-9._-]+$/i.test(url)) continue;
+      const rel = url.replace(/^\/uploads\/shipping-labels\//i, '');
+      const abs = path.resolve(labelsRoot, rel);
+      if (!abs.startsWith(labelsRoot + path.sep)) continue;
       if (fs.existsSync(abs)) {
         archive.file(abs, { name: `${o.publicId}-${path.basename(abs)}` });
       }

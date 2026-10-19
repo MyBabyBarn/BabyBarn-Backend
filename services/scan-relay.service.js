@@ -10,6 +10,13 @@ const sessions = new Map();
 
 /**
  * @typedef {{
+ *   displayName: string,
+ *   roleLabel: string,
+ *   deviceLabel: string,
+ *   requestedAt: string,
+ * }} PendingJoinRequest
+ *
+ * @typedef {{
  *   id: string,
  *   code: string,
  *   pairingToken: string,
@@ -17,6 +24,8 @@ const sessions = new Map();
  *   createdAt: number,
  *   expiresAt: number,
  *   scannerJoined: boolean,
+ *   pendingJoin: PendingJoinRequest | null,
+ *   connectedDevice: PendingJoinRequest | null,
  *   recentScans: Array<{ code: string, at: string, actorEmail?: string | null }>,
  *   subscribers: Set<(payload: object) => void>
  * }} ScanSession
@@ -93,6 +102,8 @@ export function createScanSession(actor) {
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
     scannerJoined: false,
+    pendingJoin: null,
+    connectedDevice: null,
     recentScans: [],
     subscribers: new Set(),
   };
@@ -106,19 +117,106 @@ export function createScanSession(actor) {
   };
 }
 
-export function joinScanSession(code, pairingToken) {
-  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
+/**
+ * Phone / scanner requests to join. Host must approve before scans are accepted.
+ * @param {{ displayName?: string, roleLabel?: string, deviceLabel?: string }} [meta]
+ */
+export function joinScanSession(code, pairingToken, meta = {}) {
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
+  if (session.scannerJoined) {
+    return {
+      code: session.code,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      scannerJoined: true,
+      pendingApproval: false,
+    };
+  }
+  const pending = {
+    displayName: String(meta.displayName || 'Phone scanner').slice(0, 80),
+    roleLabel: String(meta.roleLabel || 'Team Member').slice(0, 40),
+    deviceLabel: String(meta.deviceLabel || 'Mobile device').slice(0, 80),
+    requestedAt: new Date().toISOString(),
+  };
+  session.pendingJoin = pending;
+  broadcast(session, { type: 'join_request', pendingJoin: pending, at: pending.requestedAt });
+  return {
+    code: session.code,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    scannerJoined: false,
+    pendingApproval: true,
+  };
+}
+
+export function approveJoinRequest(code, pairingToken) {
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
+  if (!session.pendingJoin && !session.scannerJoined) {
+    throw new AppError(400, 'No pending connection request', 'NO_PENDING_JOIN');
+  }
+  session.connectedDevice = session.pendingJoin || session.connectedDevice;
+  session.pendingJoin = null;
   session.scannerJoined = true;
-  broadcast(session, { type: 'scanner_joined', at: new Date().toISOString() });
+  broadcast(session, {
+    type: 'scanner_joined',
+    at: new Date().toISOString(),
+    connectedDevice: session.connectedDevice,
+  });
   return {
     code: session.code,
     expiresAt: new Date(session.expiresAt).toISOString(),
     scannerJoined: true,
+    connectedDevice: session.connectedDevice,
+  };
+}
+
+export function rejectJoinRequest(code, pairingToken) {
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
+  session.pendingJoin = null;
+  broadcast(session, { type: 'join_rejected', at: new Date().toISOString() });
+  return {
+    code: session.code,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    scannerJoined: false,
+    pendingJoin: null,
+  };
+}
+
+export function disconnectScanner(code, pairingToken) {
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
+  session.scannerJoined = false;
+  session.pendingJoin = null;
+  session.connectedDevice = null;
+  broadcast(session, { type: 'scanner_disconnected', at: new Date().toISOString() });
+  return {
+    code: session.code,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    scannerJoined: false,
   };
 }
 
 export function relayScanToSession(code, scanCode, actor, pairingToken) {
-  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
+  if (!session.scannerJoined) {
+    throw new AppError(
+      403,
+      'Phone is not approved for this session yet. Wait for host approval.',
+      'SCANNER_NOT_APPROVED'
+    );
+  }
   const normalized = String(scanCode || '').trim();
   if (!normalized) throw new AppError(400, 'Scan code is required');
 
@@ -138,17 +236,25 @@ export function relayScanToSession(code, scanCode, actor, pairingToken) {
 }
 
 export function getScanSession(code, pairingToken) {
-  const session = pairingToken ? assertPairingToken(code, pairingToken) : getSession(code);
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
   return {
     code: session.code,
     expiresAt: new Date(session.expiresAt).toISOString(),
     scannerJoined: session.scannerJoined,
-    recentScans: pairingToken ? [] : session.recentScans,
+    pendingJoin: session.pendingJoin,
+    connectedDevice: session.connectedDevice,
+    recentScans: session.recentScans,
   };
 }
 
-export function subscribeScanSession(code, res) {
-  const session = getSession(code);
+export function subscribeScanSession(code, res, pairingToken) {
+  if (!pairingToken) {
+    throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+  }
+  const session = assertPairingToken(code, pairingToken);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -189,6 +295,9 @@ export async function renderSessionJoinQr(code, joinUrl) {
 export const scanRelayService = {
   createScanSession,
   joinScanSession,
+  approveJoinRequest,
+  rejectJoinRequest,
+  disconnectScanner,
   relayScanToSession,
   getScanSession,
   subscribeScanSession,

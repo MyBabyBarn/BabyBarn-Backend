@@ -21,6 +21,7 @@ import { returnPackageRequestService } from '../services/return-package-request.
 import { refurbishmentService } from '../services/refurbishment.service.js';
 import { toPublicJson } from '../utils/serialize.js';
 import { AppError } from '../utils/error-handler.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 import { z } from 'zod';
 
 export class ReturnsController {
@@ -309,6 +310,7 @@ export class ReturnsController {
         message: 'No image file received (use field name "image").',
       });
     }
+    verifyUploadedImage(file);
 
     const relative = `/uploads/returns/${file.filename}`;
     res.status(201).json({

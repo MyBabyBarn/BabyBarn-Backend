@@ -1,4 +1,5 @@
 import { config } from '../config/env.js';
+import { verifyUploadedImage } from '../utils/product-upload.js';
 import {
   blogAnalytics,
   createCategory,
@@ -83,6 +84,7 @@ export const blogController = {
       res.status(400).json({ success: false, message: 'No image uploaded' });
       return;
     }
+    verifyUploadedImage(req.file);
     const path = `/uploads/marketing/${req.file.filename}`;
     const url = `${resolvePublicBaseUrl(req)}${path}`;
     res.status(201).json({ success: true, data: { url, path } });

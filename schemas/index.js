@@ -182,7 +182,18 @@ export const updateProfileSchema = z.object({
   lastName: z.string().min(1).optional(),
   phone: optionalPhoneSchema.optional().nullable(),
   dateOfBirth: z.string().max(40).optional().nullable(),
-  avatarUrl: z.string().max(2048).optional().nullable(),
+  /** Avatars may only be cleared or set to a previously uploaded avatar path. */
+  avatarUrl: z
+    .union([
+      z.literal(''),
+      z.null(),
+      z
+        .string()
+        .max(2048)
+        .regex(/^\/uploads\/avatars\/[A-Za-z0-9._-]+$/),
+    ])
+    .optional()
+    .nullable(),
   children: z.array(profileChildSchema).max(12).optional(),
   notificationPrefs: notificationPrefsSchema.optional(),
   /** Clients may only clear the post-register membership intro (skip). */
@@ -914,7 +925,7 @@ export const scanReturnSchema = z.object({
 export const scanRelaySchema = z.object({
   sessionCode: z.string().trim().min(4).max(8),
   code: z.string().trim().min(1).max(80),
-  pairingToken: z.string().trim().min(8).max(128).optional(),
+  pairingToken: z.string().trim().min(8).max(128),
 });
 
 export const scanSessionJoinParamsSchema = z.object({
@@ -922,6 +933,13 @@ export const scanSessionJoinParamsSchema = z.object({
 });
 
 export const scanPairJoinSchema = z.object({
+  pairingToken: z.string().trim().min(8).max(128),
+  displayName: z.string().trim().max(80).optional(),
+  roleLabel: z.string().trim().max(40).optional(),
+  deviceLabel: z.string().trim().max(80).optional(),
+});
+
+export const scanPairApproveSchema = z.object({
   pairingToken: z.string().trim().min(8).max(128),
 });
 

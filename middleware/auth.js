@@ -40,39 +40,30 @@ export const authenticate = async (req, res, next) => {
         },
       });
     } catch (error) {
-      // Some environments may lag on auth-related columns while token auth still works.
-      // Fall back to a minimal read to avoid blocking checkout/session endpoints.
+      // Fail closed: schema lag must not skip isActive / tokenVersion revocation checks.
       if (error && typeof error === 'object' && 'code' in error && error.code === 'P2022') {
-        dbUser = await prisma.user.findUnique({
-          where: { publicId: decoded.id },
-          select: {
-            publicId: true,
-            email: true,
-          },
-        });
-      } else {
-        throw error;
+        throw new AppError(
+          503,
+          'Authentication temporarily unavailable. Please try again shortly.',
+          'AUTH_SCHEMA_UNAVAILABLE'
+        );
       }
+      throw error;
     }
     if (!dbUser) {
       throw new AppError(401, 'Unauthorized', 'UNAUTHORIZED');
     }
-    if ('isActive' in dbUser && dbUser.isActive === false) {
+    if (dbUser.isActive === false) {
       throw new AppError(403, 'This account has been deactivated.');
     }
     if (
-      'tokenVersion' in dbUser &&
       typeof decoded.tokenVersion === 'number' &&
       Number(dbUser.tokenVersion ?? 0) !== Number(decoded.tokenVersion)
     ) {
       throw new AppError(401, 'Session expired. Please sign in again.', 'SESSION_REVOKED');
     }
     // Legacy tokens without tokenVersion are rejected once the user has bumped version.
-    if (
-      'tokenVersion' in dbUser &&
-      decoded.tokenVersion == null &&
-      Number(dbUser.tokenVersion ?? 0) > 0
-    ) {
+    if (decoded.tokenVersion == null && Number(dbUser.tokenVersion ?? 0) > 0) {
       throw new AppError(401, 'Session expired. Please sign in again.', 'SESSION_REVOKED');
     }
 

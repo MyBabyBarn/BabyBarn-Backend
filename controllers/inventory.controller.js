@@ -25,6 +25,7 @@ import {
   scanReturnSchema,
   scanSessionJoinParamsSchema,
   scanPairJoinSchema,
+  scanPairApproveSchema,
   scanPairRelaySchema,
   scanVerifySchema,
 } from '../schemas/index.js';
@@ -265,8 +266,44 @@ export class InventoryController {
     const params = await validate(scanSessionJoinParamsSchema, {
       code: String(req.params.code || '').trim(),
     });
-    const pairingToken = req.body?.pairingToken ? String(req.body.pairingToken) : undefined;
-    const data = scanRelayService.joinScanSession(params.code, pairingToken);
+    const body = await validate(scanPairJoinSchema, {
+      pairingToken: String(req.body?.pairingToken || ''),
+      displayName: req.body?.displayName,
+      roleLabel: req.body?.roleLabel,
+      deviceLabel: req.body?.deviceLabel,
+    });
+    const data = scanRelayService.joinScanSession(params.code, body.pairingToken, {
+      displayName: body.displayName || req.user?.email || 'Staff scanner',
+      roleLabel: body.roleLabel || req.user?.role || 'Team Member',
+      deviceLabel: body.deviceLabel || 'Browser',
+    });
+    res.status(200).json({ success: true, data });
+  }
+
+  async approveScanSessionJoin(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const body = await validate(scanPairApproveSchema, req.body ?? {});
+    const data = scanRelayService.approveJoinRequest(params.code, body.pairingToken);
+    res.status(200).json({ success: true, data });
+  }
+
+  async rejectScanSessionJoin(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const body = await validate(scanPairApproveSchema, req.body ?? {});
+    const data = scanRelayService.rejectJoinRequest(params.code, body.pairingToken);
+    res.status(200).json({ success: true, data });
+  }
+
+  async disconnectScanSession(req, res) {
+    const params = await validate(scanSessionJoinParamsSchema, {
+      code: String(req.params.code || '').trim(),
+    });
+    const body = await validate(scanPairApproveSchema, req.body ?? {});
+    const data = scanRelayService.disconnectScanner(params.code, body.pairingToken);
     res.status(200).json({ success: true, data });
   }
 
@@ -285,7 +322,17 @@ export class InventoryController {
       code: String(req.params.code || '').trim(),
     });
     const body = await validate(scanPairJoinSchema, req.body ?? {});
-    const data = scanRelayService.joinScanSession(params.code, body.pairingToken);
+    const ua = String(req.get('user-agent') || '');
+    const deviceGuess = /iPhone/i.test(ua)
+      ? 'iPhone'
+      : /Android/i.test(ua)
+        ? 'Android phone'
+        : 'Mobile device';
+    const data = scanRelayService.joinScanSession(params.code, body.pairingToken, {
+      displayName: body.displayName || 'Phone scanner',
+      roleLabel: body.roleLabel || 'Team Member',
+      deviceLabel: body.deviceLabel || deviceGuess,
+    });
     res.status(200).json({ success: true, data });
   }
 
@@ -312,14 +359,23 @@ export class InventoryController {
     const params = await validate(scanSessionJoinParamsSchema, {
       code: String(req.params.code || '').trim(),
     });
-    scanRelayService.subscribeScanSession(params.code, res);
+    const pairingToken = String(req.query?.pairingToken || '').trim();
+    if (!pairingToken) {
+      throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+    }
+    scanRelayService.subscribeScanSession(params.code, res, pairingToken);
   }
 
   async scanSessionQr(req, res) {
     const params = await validate(scanSessionJoinParamsSchema, {
       code: String(req.params.code || '').trim(),
     });
-    scanRelayService.getScanSession(params.code);
+    const pairingToken = String(req.query?.pairingToken || '').trim();
+    if (!pairingToken) {
+      throw new AppError(401, 'Pairing token is required', 'PAIRING_TOKEN_REQUIRED');
+    }
+    // Prove the caller knows the session secret before rendering a join QR.
+    scanRelayService.assertPairingToken(params.code, pairingToken);
     const joinUrl = req.query.joinUrl ? String(req.query.joinUrl) : undefined;
     const buffer = await scanRelayService.renderSessionJoinQr(params.code, joinUrl);
     res.setHeader('Content-Type', 'image/png');
@@ -346,10 +402,23 @@ export class InventoryController {
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
+  async listDraftSessions(req, res) {
+    if (!req.user?.id) throw new AppError(401, 'Unauthorized');
+    const data = await inventoryScanDraftService.listSessions({
+      userPublicId: req.user.id,
+      status: req.query.status,
+      search: req.query.search,
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async getDraftSession(req, res) {
     if (!req.user?.id) throw new AppError(401, 'Unauthorized');
     const params = await validate(inventoryDraftSessionParamsSchema, { id: req.params.id });
-    const data = await inventoryScanDraftService.getDraftSession({
+    // Past-session detail: allow non-draft owned sessions
+    const data = await inventoryScanDraftService.getOwnedSession({
       sessionPublicId: params.id,
       userPublicId: req.user.id,
     });

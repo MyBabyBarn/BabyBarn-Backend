@@ -157,6 +157,162 @@ export async function getDraftSession({ sessionPublicId, userPublicId }) {
   return toPublicSession(session);
 }
 
+/** Read any owned session (draft, confirmed, or discarded) for past-session detail. */
+export async function getOwnedSession({ sessionPublicId, userPublicId }) {
+  const user = await findActorUser(userPublicId);
+  const session = await prisma.inventoryScanSession.findUnique({
+    where: { publicId: sessionPublicId },
+    include: {
+      ...sessionInclude,
+      createdBy: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+    },
+  });
+  if (!session || session.createdById !== user.id) {
+    throw new AppError(404, 'Session not found');
+  }
+  const pub = toPublicSession(session);
+  return {
+    ...pub,
+    createdBy: session.createdBy
+      ? {
+          id: session.createdBy.publicId,
+          email: session.createdBy.email,
+          name: [session.createdBy.firstName, session.createdBy.lastName].filter(Boolean).join(' ') || null,
+        }
+      : null,
+    summary: summarizeLines(session.lines || []),
+  };
+}
+
+function summarizeLines(lines) {
+  let unitsIn = 0;
+  let unitsOut = 0;
+  let unitsAdjust = 0;
+  let productsChanged = 0;
+  for (const line of lines) {
+    if (line.action === 'NO_CHANGE') continue;
+    productsChanged += 1;
+    if (line.action === 'ADD') unitsIn += Number(line.pendingQty || 0);
+    else if (line.action === 'REMOVE') unitsOut += Number(line.pendingQty || 0);
+    else if (line.action === 'SET') {
+      const baseline = Number(line.expectedOnHand ?? 0);
+      unitsAdjust += Math.abs(Number(line.pendingQty || 0) - baseline);
+    }
+  }
+  return {
+    productsChanged,
+    lineCount: lines.length,
+    unitsIn,
+    unitsOut,
+    unitsAdjust,
+    operationTypes: [
+      ...new Set(lines.filter((l) => l.action !== 'NO_CHANGE').map((l) => l.action)),
+    ],
+  };
+}
+
+/**
+ * List past sessions for the signed-in user (excludes active DRAFT by default unless status=DRAFT).
+ */
+export async function listSessions({
+  userPublicId,
+  status,
+  search,
+  page = 1,
+  limit = 20,
+}) {
+  const user = await findActorUser(userPublicId);
+  const take = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
+
+  const where = { createdById: user.id };
+  if (status && ['DRAFT', 'CONFIRMED', 'DISCARDED'].includes(String(status).toUpperCase())) {
+    where.status = String(status).toUpperCase();
+  } else {
+    // Default: past work — completed + discarded + drafts (all for tabs)
+    where.status = { in: ['DRAFT', 'CONFIRMED', 'DISCARDED'] };
+  }
+  if (search?.trim()) {
+    const q = search.trim();
+    where.OR = [
+      { publicId: { contains: q, mode: 'insensitive' } },
+      { sessionNote: { contains: q, mode: 'insensitive' } },
+      { location: { contains: q, mode: 'insensitive' } },
+    ];
+  }
+
+  const [total, rows] = await Promise.all([
+    prisma.inventoryScanSession.count({ where }),
+    prisma.inventoryScanSession.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+      skip,
+      take,
+      include: {
+        lines: {
+          select: {
+            action: true,
+            pendingQty: true,
+            expectedOnHand: true,
+            productId: true,
+          },
+        },
+        createdBy: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+      },
+    }),
+  ]);
+
+  const items = rows.map((session) => {
+    const summary = summarizeLines(session.lines);
+    return {
+      id: session.publicId,
+      status: session.status,
+      sessionNote: session.sessionNote,
+      location: session.location,
+      confirmedAt: session.confirmedAt,
+      discardedAt: session.discardedAt,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      name:
+        session.sessionNote?.trim() ||
+        (session.status === 'DRAFT'
+          ? 'Draft session'
+          : session.status === 'CONFIRMED'
+            ? 'Inventory update'
+            : 'Discarded session'),
+      createdBy: session.createdBy
+        ? {
+            id: session.createdBy.publicId,
+            email: session.createdBy.email,
+            name:
+              [session.createdBy.firstName, session.createdBy.lastName].filter(Boolean).join(' ') ||
+              null,
+          }
+        : null,
+      summary,
+    };
+  });
+
+  const [drafts, completed, discarded] = await Promise.all([
+    prisma.inventoryScanSession.count({ where: { createdById: user.id, status: 'DRAFT' } }),
+    prisma.inventoryScanSession.count({ where: { createdById: user.id, status: 'CONFIRMED' } }),
+    prisma.inventoryScanSession.count({ where: { createdById: user.id, status: 'DISCARDED' } }),
+  ]);
+
+  return {
+    items,
+    page: Math.max(Number(page) || 1, 1),
+    limit: take,
+    total,
+    stats: {
+      totalSessions: drafts + completed + discarded,
+      drafts,
+      completed,
+      discarded,
+    },
+  };
+}
+
 /**
  * Resolve barcode/SKU and upsert a draft line. Increments scannedCount only — no ledger write.
  */
@@ -537,6 +693,8 @@ export async function confirmDraft({ sessionPublicId, userPublicId }) {
 export const inventoryScanDraftService = {
   getOrCreateActiveDraft,
   getDraftSession,
+  getOwnedSession,
+  listSessions,
   identifyAndUpsertLine,
   updateDraftLine,
   removeDraftLine,

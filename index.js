@@ -41,10 +41,29 @@ app.use(
   })
 );
 
+/** Public product/marketing media only — never expose shipping labels or sensitive uploads. */
+app.use('/uploads', (req, res, next) => {
+  void res;
+  const rel = String(req.path || '')
+    .replace(/\\/g, '/')
+    .toLowerCase();
+  if (
+    rel === '/shipping-labels' ||
+    rel.startsWith('/shipping-labels/') ||
+    rel.includes('/../') ||
+    rel.includes('%2e%2e')
+  ) {
+    return next(new AppError(403, 'Forbidden'));
+  }
+  next();
+});
 app.use(
   '/uploads',
   express.static(path.join(__dirname, 'uploads'), {
     maxAge: config.nodeEnv === 'production' ? '7d' : 0,
+    setHeaders(res) {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+    },
   })
 );
 
@@ -83,10 +102,27 @@ app.use(
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many auth attempts. Try again later.' },
+});
+
+/** Stricter limits for credential-guessing / reset spray surfaces. */
+const authCredentialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts. Try again later.' },
+});
+
+const authRecoveryLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many password reset attempts. Try again later.' },
 });
 
 const apiLimiter = rateLimit({
@@ -112,6 +148,12 @@ app.use(
 
 app.use('/api/auth', authLimiter);
 app.use('/api/v1/auth', authLimiter);
+app.use(['/api/auth/login', '/api/v1/auth/login'], authCredentialLimiter);
+app.use(['/api/auth/register', '/api/v1/auth/register'], authCredentialLimiter);
+app.use(
+  ['/api/auth/forgot-password', '/api/v1/auth/forgot-password', '/api/auth/reset-password', '/api/v1/auth/reset-password'],
+  authRecoveryLimiter
+);
 app.use('/api', apiLimiter);
 app.use('/api/v1', apiLimiter);
 
