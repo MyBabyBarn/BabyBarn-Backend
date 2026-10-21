@@ -15,6 +15,7 @@ import {
   rehomeMisScopedStaffToStaffPortal,
 } from '../lib/portal-scope.js';
 import { linkEligibleGuestOrdersToUser } from './guest-order-link.service.js';
+import { guestConversionPolicy, guestConversionUpdate } from '../lib/guest-account-claim.js';
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -218,31 +219,48 @@ export class AuthService {
 
     if (existingUser) {
       if (existingUser.isGuest) {
+        const policy = guestConversionPolicy();
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.user.update({
           where: { id: existingUser.id },
           data: {
-            password: hashedPassword,
-            firstName: firstName?.trim() || existingUser.firstName,
-            lastName: lastName?.trim() || existingUser.lastName,
-            isGuest: false,
-            convertedAt: new Date(),
-            emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
+            ...guestConversionUpdate({
+              hashedPassword,
+              firstName,
+              lastName,
+              existingFirstName: existingUser.firstName,
+              existingLastName: existingUser.lastName,
+            }),
             portalScope: PORTAL_SCOPE.CUSTOMER,
-            accessOnboardingPending: true,
           },
           include: { role: true },
         });
 
-        await linkEligibleGuestOrdersToUser(user.id, user.email);
+        await invalidateAllSessions(user.id);
 
-        const tokens = await issueSessionTokens(user);
+        if (policy.linkOrdersBeforeVerification) {
+          await linkEligibleGuestOrdersToUser(user.id, user.email);
+        }
+
+        const verifyToken = await this.createEmailVerificationToken(user.id);
+        const actionUrl = `${config.frontend.customerUrl}/verify-email?token=${verifyToken}`;
+        await this.sendAuthEmail({
+          to: user.email,
+          template: 'verify-email',
+          context: {
+            name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
+            actionUrl,
+          },
+        });
+
+        const tokens = policy.issueSessionTokens ? await issueSessionTokens(user) : {};
 
         return {
           user: toPublicUser(user),
           ...tokens,
           convertedFromGuest: true,
-          message: 'Account created. Your recent guest orders are now in your dashboard.',
+          requiresEmailVerification: policy.requiresEmailVerification,
+          message: 'Account created. Verify your email before guest orders are added to your account.',
         };
       }
       throw new AppError(
@@ -874,7 +892,7 @@ export class AuthService {
     await prisma.$transaction([
       prisma.user.update({
         where: { id: record.userId },
-        data: { password: hashedPassword },
+        data: { password: hashedPassword, mustChangePassword: false },
       }),
       prisma.passwordResetToken.update({
         where: { id: record.id },

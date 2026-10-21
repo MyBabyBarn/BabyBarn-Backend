@@ -3,6 +3,7 @@ import { authenticate, authorize, requireCustomerFullAccount } from '../middlewa
 import { requireConsoleModuleAny } from '../middleware/admin-console.js';
 
 const returnsOrInspection = requireConsoleModuleAny(['returns', 'inspection']);
+const returnsOrFinance = requireConsoleModuleAny(['returns', 'finance']);
 import { returnsController } from '../controllers/returns.controller.js';
 import { returnPhotoUpload } from '../utils/product-upload.js';
 
@@ -102,7 +103,7 @@ router.post(
   '/:id/return-label',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
+  returnsOrFinance,
   (req, res, next) => returnsController.generateReturnLabel(req, res).catch(next)
 );
 router.post(
@@ -186,7 +187,7 @@ router.post(
   '/:id/refund',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
+  returnsOrFinance,
   (req, res, next) => returnsController.processRefund(req, res).catch(next)
 );
 router.post(
@@ -200,7 +201,7 @@ router.post(
   '/:id/approve-and-settle',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
-  returnsOrInspection,
+  returnsOrFinance,
   (req, res, next) => returnsController.approveAndSettle(req, res).catch(next)
 );
 

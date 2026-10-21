@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { AppError } from '../utils/error-handler.js';
 import { normalizeTeamPermissionModules } from '../constants/admin-modules.js';
 import { emailService } from './email.service.js';
@@ -741,11 +742,14 @@ async function assertActorIsAdmin(actorPublicId) {
 
 export async function listAdminTeamMembers(actorPublicId) {
   void actorPublicId;
-  const role = await prisma.role.findUnique({ where: { name: 'ADMIN_TEAM' } });
-  if (!role) return { members: [] };
+  const roles = await prisma.role.findMany({
+    where: { name: { in: ['ADMIN', 'ADMIN_TEAM'] } },
+    select: { id: true, name: true },
+  });
+  if (!roles.length) return { members: [], supportEmail: config.brand?.supportEmail || null };
   const users = await prisma.user.findMany({
-    where: { roleId: role.id },
-    orderBy: { email: 'asc' },
+    where: { roleId: { in: roles.map((role) => role.id) } },
+    orderBy: [{ role: { name: 'asc' } }, { email: 'asc' }],
     select: {
       publicId: true,
       email: true,
@@ -755,15 +759,53 @@ export async function listAdminTeamMembers(actorPublicId) {
       adminModules: true,
       adminNotificationAccess: true,
       isActive: true,
+      mustChangePassword: true,
       createdAt: true,
+      role: { select: { name: true } },
     },
   });
   return {
+    supportEmail: config.brand?.supportEmail || null,
     members: users.map((user) => ({
-      ...user,
-      roleTitle: user.phone || null,
+      publicId: user.publicId,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      phone: user.phone,
+      adminModules: user.adminModules,
+      adminNotificationAccess: user.adminNotificationAccess,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+      roleTitle: user.role?.name === 'ADMIN' ? 'Default admin' : user.phone || null,
+      isDefault: user.role?.name === 'ADMIN',
+      invitePending: user.role?.name === 'ADMIN_TEAM' && user.mustChangePassword === true,
     })),
   };
+}
+
+async function issueTeamSetPasswordEmail(user, roleTitle) {
+  const setPasswordToken = crypto.randomBytes(32).toString('hex');
+  await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
+  await prisma.passwordResetToken.create({
+    data: {
+      token: setPasswordToken,
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  const setPasswordUrl = `${config.frontend.adminUrl}/reset-password?token=${setPasswordToken}`;
+  await emailService.sendTemplate({
+    to: user.email,
+    template: 'team-invite',
+    context: {
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
+      email: user.email,
+      roleTitle: roleTitle || 'Team Member',
+      actionUrl: setPasswordUrl,
+      loginUrl: setPasswordUrl,
+      supportEmail: config.brand?.supportEmail || null,
+    },
+  });
 }
 
 export async function createAdminTeamMember(actorPublicId, payload) {
@@ -772,7 +814,6 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   if (!teamRole) throw new AppError(500, 'ADMIN_TEAM role missing');
 
   const email = String(payload.email || '').trim().toLowerCase();
-  const tempPassword = `Bb!${Math.random().toString(36).slice(2, 8)}${Math.floor(Math.random() * 90 + 10)}`;
   const firstName = payload.firstName ? String(payload.firstName).trim() : null;
   const lastName = payload.lastName ? String(payload.lastName).trim() : null;
   const roleTitle = payload.roleTitle ? String(payload.roleTitle).trim() : null;
@@ -797,7 +838,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     throw new AppError(400, 'At least one module permission is required');
   }
 
-  const hashed = await bcrypt.hash(tempPassword, 10);
+  const hashed = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   let created;
   try {
     created = await prisma.user.create({
@@ -813,6 +854,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
         adminNotificationAccess,
         emailVerifiedAt: new Date(),
         isActive: true,
+        mustChangePassword: true,
       },
       select: {
         publicId: true,
@@ -843,18 +885,12 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     entityId: created.publicId,
     meta: { modules: normalized, roleTitle, adminNotificationAccess },
   });
+  const createdRow = await prisma.user.findUnique({
+    where: { publicId: created.publicId },
+    select: { id: true, email: true, firstName: true, lastName: true },
+  });
   try {
-    await emailService.sendTemplate({
-      to: created.email,
-      template: 'team-invite',
-      context: {
-        name: [created.firstName, created.lastName].filter(Boolean).join(' ') || created.email,
-        email: created.email,
-        temporaryPassword: tempPassword,
-        roleTitle: roleTitle || 'Team Member',
-        loginUrl: `${config.frontend.adminUrl}/auth/login`,
-      },
-    });
+    if (createdRow) await issueTeamSetPasswordEmail(createdRow, roleTitle);
   } catch (error) {
     await writeAdminAudit({
       actorId: actorPublicId,
@@ -979,4 +1015,110 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
     ...updated,
     roleTitle: updated.phone || null,
   };
+}
+
+async function findManagedTeamUser(targetPublicId) {
+  const target = await prisma.user.findUnique({
+    where: { publicId: targetPublicId },
+    select: {
+      id: true,
+      publicId: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      phone: true,
+      isActive: true,
+      mustChangePassword: true,
+      role: { select: { name: true } },
+    },
+  });
+  if (!target || (target.role?.name !== 'ADMIN' && target.role?.name !== 'ADMIN_TEAM')) {
+    throw new AppError(404, 'Team member not found');
+  }
+  return target;
+}
+
+export async function resendTeamInvite(actorPublicId, targetPublicId) {
+  await assertActorIsAdmin(actorPublicId);
+  const target = await findManagedTeamUser(targetPublicId);
+  if (target.role?.name === 'ADMIN') {
+    throw new AppError(400, 'The default admin already has a password. Use forgot password on the sign-in page.');
+  }
+  await prisma.user.update({
+    where: { id: target.id },
+    data: { mustChangePassword: true },
+  });
+  await issueTeamSetPasswordEmail(target, target.phone);
+  await writeAdminAudit({
+    actorId: actorPublicId,
+    action: 'TEAM_INVITE_RESENT',
+    entityType: 'User',
+    entityId: target.publicId,
+    meta: { email: target.email },
+  });
+  return { publicId: target.publicId, email: target.email, invitePending: true };
+}
+
+export async function deleteTeamMember(actorPublicId, targetPublicId) {
+  await assertActorIsAdmin(actorPublicId);
+  const target = await findManagedTeamUser(targetPublicId);
+  if (target.role?.name === 'ADMIN') {
+    throw new AppError(400, 'The default admin account cannot be deleted.');
+  }
+  if (target.publicId === actorPublicId) {
+    throw new AppError(400, 'You cannot delete the account you are signed in with.');
+  }
+
+  const [orders, returns, memberships, checkouts, adjustments, wallet] = await Promise.all([
+    prisma.order.count({ where: { userId: target.id } }),
+    prisma.returnRequest.count({ where: { userId: target.id } }),
+    prisma.membershipPayment.count({ where: { userId: target.id } }),
+    prisma.checkoutIntent.count({ where: { userId: target.id } }),
+    prisma.inventoryAdjustment.count({ where: { userId: target.id } }),
+    prisma.storeCreditWallet.count({ where: { userId: target.id } }),
+  ]);
+  const hasHistory = orders + returns + memberships + checkouts + adjustments + wallet > 0;
+  if (hasHistory) {
+    await prisma.user.update({
+      where: { id: target.id },
+      data: { isActive: false },
+    });
+    await writeAdminAudit({
+      actorId: actorPublicId,
+      action: 'TEAM_MEMBER_DISABLED',
+      entityType: 'User',
+      entityId: target.publicId,
+      meta: { reason: 'history-exists' },
+    });
+    return {
+      mode: 'disabled',
+      publicId: target.publicId,
+      message: 'This account has history, so it was disabled instead of deleted.',
+    };
+  }
+
+  try {
+    await prisma.user.delete({ where: { id: target.id } });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') {
+      await prisma.user.update({
+        where: { id: target.id },
+        data: { isActive: false },
+      });
+      return {
+        mode: 'disabled',
+        publicId: target.publicId,
+        message: 'This account has history, so it was disabled instead of deleted.',
+      };
+    }
+    throw error;
+  }
+  await writeAdminAudit({
+    actorId: actorPublicId,
+    action: 'TEAM_MEMBER_DELETED',
+    entityType: 'User',
+    entityId: target.publicId,
+    meta: { email: target.email },
+  });
+  return { mode: 'deleted', publicId: target.publicId, message: 'Team invite deleted.' };
 }

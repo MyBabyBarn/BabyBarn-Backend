@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { usdToCents } from '../lib/order-refund-balance.js';
 import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
 import {
   buildAdminStatusGroupWhere,
@@ -2499,21 +2500,20 @@ export class OrderService {
       );
       const nextTax = Math.max(0, Math.round((taxOnOrder - taxShare) * 100) / 100);
       let nextTotal;
-      if (cancellingAll) {
+      if (!isPaid && cancellingAll) {
         nextTotal = 0;
-      } else if (isPaid) {
-        nextTotal = Math.max(
-          0,
-          Math.round((Number(order.totalAmount) - refundAmountUsd) * 100) / 100
-        );
-      } else {
-        // Unpaid: drop cancelled merchandise/tax/credit from the amount still due.
+      } else if (!isPaid) {
         nextTotal = Math.max(
           0,
           Math.round((Number(order.totalAmount) - cancelMerchandise - taxShare + creditShare) * 100) /
             100
         );
+      } else {
+        nextTotal = Number(order.totalAmount);
       }
+      const refundedAmountCents = isPaid
+        ? Math.max(0, Number(order.refundedAmountCents || 0)) + usdToCents(refundAmountUsd)
+        : Number(order.refundedAmountCents || 0);
 
       return tx.order.update({
         where: { id: order.id },
@@ -2525,9 +2525,10 @@ export class OrderService {
               : 'PARTIALLY_REFUNDED'
             : order.paymentStatus,
           fulfillmentStatus: remainingActive === 0 ? null : order.fulfillmentStatus,
-          storeCreditApplied: nextStoreCredit,
-          taxAmount: nextTax,
+          storeCreditApplied: isPaid ? Number(order.storeCreditApplied || 0) : nextStoreCredit,
+          taxAmount: isPaid ? Number(order.taxAmount || 0) : nextTax,
           totalAmount: nextTotal,
+          refundedAmountCents,
           cancellationReviewStatus: reviewStatus,
           cancellationRequestedAt: now,
           cancellationRequestReason: reasonTrimmed,

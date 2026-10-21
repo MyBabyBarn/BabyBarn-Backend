@@ -26,6 +26,7 @@ import stockAlertsRoutes from './routes/stock-alerts.js';
 import systemRoutes from './routes/system.js';
 import reviewsRoutes from './routes/reviews.js';
 import { primaryLanIpv4 } from './lib/lan-host.js';
+import { assertPrivateUploadAccess, isPrivateUploadPath } from './lib/private-upload-access.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 import { startScheduledJobs } from './services/scheduled-jobs.service.js';
 
@@ -41,21 +42,19 @@ app.use(
   })
 );
 
-/** Public product/marketing media only — never expose shipping labels or sensitive uploads. */
+/** Public product/marketing media only. Return photos and shipping labels need a session. */
 app.use('/uploads', (req, res, next) => {
   void res;
-  const rel = String(req.path || '')
-    .replace(/\\/g, '/')
-    .toLowerCase();
-  if (
-    rel === '/shipping-labels' ||
-    rel.startsWith('/shipping-labels/') ||
-    rel.includes('/../') ||
-    rel.includes('%2e%2e')
-  ) {
+  const rel = String(req.path || '').replace(/\\/g, '/');
+  const lower = rel.toLowerCase();
+  if (lower.includes('/../') || lower.includes('%2e%2e')) {
     return next(new AppError(403, 'Forbidden'));
   }
-  next();
+  if (!isPrivateUploadPath(lower)) {
+    next();
+    return;
+  }
+  assertPrivateUploadAccess(req, rel).then(() => next()).catch(next);
 });
 app.use(
   '/uploads',
