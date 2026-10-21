@@ -9,21 +9,13 @@ import { buildOrderTrackingUrl, buildGuestReturnUrl } from '../lib/order-trackin
 import { notifyNewPaidOrder } from './admin-notification.service.js';
 import {
   beginStripeWebhookEvent,
-  finishStripeWebhookEvent,
+  completeStripeWebhookEvent,
+  failStripeWebhookEvent,
 } from '../lib/stripe-webhook-idempotency.js';
 import {
   derivePaymentStatusFromRefundTotals,
   moneyRound,
-  usdToCents,
 } from '../lib/order-refund-balance.js';
-import {
-  buildHostedCheckoutCharge,
-  checkoutAmountMatches,
-} from '../lib/hosted-checkout-charge.js';
-import {
-  recordOpenPaymentReconciliation,
-  resolveOpenPaymentReconciliations,
-} from '../lib/payment-reconciliation.js';
 
 async function getMembershipUnitAmountCents() {
   try {
@@ -471,11 +463,14 @@ async function markOrderRefundedBySessionId(sessionId, source) {
     };
   }
 
+  const remainingCents = Math.max(0, amountPaidCents - amountRefundedCents);
+  const nextTotalUsd = moneyRound(remainingCents / 100);
+
   await prisma.order.update({
     where: { id: order.id },
     data: {
       paymentStatus,
-      refundedAmountCents: amountRefundedCents,
+      totalAmount: nextTotalUsd,
       ...(paymentStatus === 'REFUNDED' ? { status: 'REFUNDED' } : {}),
     },
   });
@@ -546,7 +541,6 @@ async function handleOrderCheckoutCompleted(session) {
     }
     const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, {
       paymentIntentId: paymentIntentId || undefined,
-      amountReceivedCents: Number.isInteger(session.amount_total) ? session.amount_total : undefined,
     });
     if (result && typeof result === 'object' && result.orderPublicId) {
       await prisma.order.updateMany({
@@ -582,10 +576,8 @@ async function handleOrderPaymentIntentSucceeded(paymentIntent) {
       where: { publicId: checkoutIntentPublicId },
       data: { stripePaymentIntentId: paymentIntent.id },
     });
-    const receivedCents = Number(paymentIntent.amount_received ?? paymentIntent.amount);
     const result = await handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, {
       paymentIntentId: paymentIntent.id,
-      amountReceivedCents: Number.isInteger(receivedCents) ? receivedCents : undefined,
     });
     await splitOrderTransfersIfBundled(getStripe(), checkoutIntentPublicId, paymentIntent);
     return result;
@@ -767,26 +759,27 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
   const successUrl = `${config.storeUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = `${config.storeUrl}/checkout/error?reason=cancelled`;
 
-  const charge = buildHostedCheckoutCharge(checkoutIntent);
-  if (charge.expectedCents < 50) {
-    throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
-  }
-  const lineItems = charge.lineItems;
-  let storeCreditDiscounts;
-  if (charge.storeCreditCents > 0) {
-    let coupon;
-    try {
-      coupon = await stripe.coupons.create({
-        amount_off: charge.storeCreditCents,
+  const lineItems = checkoutIntent.lines.map((line) => ({
+    quantity: line.quantity,
+    price_data: {
+      currency: 'usd',
+      unit_amount: Math.round(Number(line.price) * 100),
+      product_data: {
+        name: line.product.name,
+      },
+    },
+  }));
+  if (checkoutIntent.includeAccessMembership && Number(checkoutIntent.accessMembershipAmount) > 0) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
         currency: 'usd',
-        duration: 'once',
-        name: 'Store credit',
-        max_redemptions: 1,
-      });
-    } catch (error) {
-      throw toStripeAppError(error, 'STRIPE_CHECKOUT_CREATE_FAILED', 'order');
-    }
-    storeCreditDiscounts = [{ coupon: coupon.id }];
+        unit_amount: Math.round(Number(checkoutIntent.accessMembershipAmount) * 100),
+        product_data: {
+          name: 'Baby Barn Farmhouse Friends (1 year)',
+        },
+      },
+    });
   }
 
   // Bundled orders are charged on the platform and split via transfers afterwards, so
@@ -804,7 +797,6 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
     customer_email: user.email,
     customer_creation: 'always',
     line_items: lineItems,
-    ...(storeCreditDiscounts ? { discounts: storeCreditDiscounts } : {}),
     metadata: {
       flow: 'order',
       checkoutIntentPublicId: checkoutIntent.publicId,
@@ -1055,57 +1047,25 @@ async function sendOrderConfirmationEmail(orderPublicId) {
   }
 }
 
-async function resolvePaymentSucceededForIntent(checkoutIntentPublicId, opts = {}) {
-  const explicitAmount = Number.isInteger(opts.amountReceivedCents) ? opts.amountReceivedCents : null;
+async function resolvePaymentSucceededForIntent(checkoutIntentPublicId, paymentIntentId) {
   const intent = await prisma.checkoutIntent.findUnique({
     where: { publicId: checkoutIntentPublicId },
-    select: { stripePaymentIntentId: true, totalAmount: true },
+    select: { stripePaymentIntentId: true },
   });
-  const expectedCents = intent ? usdToCents(intent.totalAmount) : null;
-  if (!intent) {
-    return { succeeded: false, amountReceivedCents: explicitAmount, expectedCents };
-  }
+  if (!intent) return false;
 
   const stripe = getStripe();
-  const piId = opts.paymentIntentId || intent.stripePaymentIntentId;
-  const canRetrieve = Boolean(stripe && piId && !String(piId).startsWith('cs_'));
-  if (!canRetrieve) {
-    return {
-      succeeded: explicitAmount != null,
-      amountReceivedCents: explicitAmount,
-      expectedCents,
-    };
-  }
+  if (!stripe) return false;
+
+  const piId = paymentIntentId || intent.stripePaymentIntentId;
+  if (!piId) return false;
 
   try {
     const pi = await stripe.paymentIntents.retrieve(piId);
-    const received = Number(pi.amount_received ?? pi.amount);
-    return {
-      succeeded: pi.status === 'succeeded',
-      amountReceivedCents: Number.isInteger(received) ? received : explicitAmount,
-      expectedCents,
-    };
+    return pi.status === 'succeeded';
   } catch {
-    return {
-      succeeded: explicitAmount != null,
-      amountReceivedCents: explicitAmount,
-      expectedCents,
-    };
+    return false;
   }
-}
-
-async function rejectMismatchedPaidCheckout(checkoutIntentPublicId, payment, opts) {
-  const message = `Stripe charged ${payment.amountReceivedCents ?? 'unknown'} cents but checkout total is ${payment.expectedCents ?? 'unknown'} cents`;
-  console.error('[stripe webhook] paid amount does not match checkout total', checkoutIntentPublicId, message);
-  await recordOpenPaymentReconciliation(prisma, {
-    checkoutIntentPublicId,
-    paymentIntentId: opts.paymentIntentId || null,
-    amountCents: Number.isInteger(payment.amountReceivedCents) ? payment.amountReceivedCents : null,
-    error: message,
-  });
-  const error = new Error(message);
-  error.code = 'CHECKOUT_AMOUNT_MISMATCH';
-  throw error;
 }
 
 async function loadPaidOrderFromConsumedIntent(checkoutIntentPublicId) {
@@ -1129,18 +1089,16 @@ async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, opts
 
   const intentBefore = await prisma.checkoutIntent.findUnique({
     where: { publicId: checkoutIntentPublicId },
-    select: { status: true, orderPublicId: true, totalAmount: true },
+    select: { status: true, orderPublicId: true },
   });
   if (!intentBefore) {
     return { handled: true, flow: 'order', error: 'missing checkout intent' };
   }
   const alreadyConsumed = intentBefore.status === 'CONSUMED' && intentBefore.orderPublicId;
-  const payment = await resolvePaymentSucceededForIntent(checkoutIntentPublicId, opts);
-  const paymentSucceeded = payment.succeeded;
-
-  if (paymentSucceeded && !alreadyConsumed && !checkoutAmountMatches(payment.amountReceivedCents, payment.expectedCents)) {
-    await rejectMismatchedPaidCheckout(checkoutIntentPublicId, payment, opts);
-  }
+  const paymentSucceeded = await resolvePaymentSucceededForIntent(
+    checkoutIntentPublicId,
+    opts.paymentIntentId
+  );
 
   let paidOrder = null;
   try {
@@ -1159,20 +1117,9 @@ async function handleCheckoutIntentPaymentCompleted(checkoutIntentPublicId, opts
           where: { publicId: checkoutIntentPublicId, status: 'PENDING' },
           data: { status: 'FAILED' },
         });
-        return { handled: true, flow: 'order', error: String(err?.message || err) };
       }
-      await recordOpenPaymentReconciliation(prisma, {
-        checkoutIntentPublicId,
-        paymentIntentId: opts.paymentIntentId || null,
-        amountCents: Number.isInteger(payment.amountReceivedCents) ? payment.amountReceivedCents : usdToCents(intentBefore.totalAmount),
-        error: String(err?.message || err),
-      });
-      throw err;
+      return { handled: true, flow: 'order', error: String(err?.message || err) };
     }
-  }
-
-  if (paidOrder) {
-    await resolveOpenPaymentReconciliations(prisma, checkoutIntentPublicId);
   }
 
   if (!alreadyConsumed && paidOrder?.publicId) {
@@ -1345,7 +1292,6 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     if (sessionIntentId && (session?.payment_status === 'paid' || session?.status === 'complete')) {
       await handleCheckoutIntentPaymentCompleted(sessionIntentId, {
         paymentIntentId: sessionPiId || ref,
-        amountReceivedCents: Number.isInteger(session?.amount_total) ? session.amount_total : undefined,
       });
       order = await prisma.order.findFirst({
         where: { userId: user.id, stripePaymentIntentId: ref },
@@ -1647,7 +1593,14 @@ export async function processStripeWebhook(rawBody, signatureHeader) {
     };
   }
 
-  return finishStripeWebhookEvent(prisma, event.id, () => dispatchStripeWebhookEvent(event, stripe));
+  try {
+    const result = await dispatchStripeWebhookEvent(event, stripe);
+    await completeStripeWebhookEvent(prisma, event.id);
+    return result;
+  } catch (err) {
+    await failStripeWebhookEvent(prisma, event.id);
+    throw err;
+  }
 }
 
 /** @param {import('stripe').Stripe.Event} event */

@@ -1,6 +1,5 @@
 import dotenv from 'dotenv';
 import { parseDurationToMs } from '../lib/duration.js';
-import { assertJwtSecret } from '../lib/jwt-secret.js';
 
 dotenv.config();
 
@@ -18,24 +17,22 @@ function toUnique(items) {
   return [...new Set(items)];
 }
 
+if (nodeEnv === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET is required in production');
+}
+
 const jwtExpiryTime = process.env.JWT_EXPIRY || '15m';
 const jwtRefreshExpiryTime = process.env.JWT_REFRESH_EXPIRY || '30d';
-
-const jwtSecret = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-const jwtRefreshSecret =
-  process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'your-refresh-secret-change-in-production';
-assertJwtSecret('JWT_SECRET', jwtSecret, nodeEnv);
-assertJwtSecret('JWT_REFRESH_SECRET', jwtRefreshSecret, nodeEnv);
 
 export const config = {
   database: {
     url: process.env.DATABASE_URL || 'postgresql://localhost/ecommerce',
   },
   jwt: {
-    secret: jwtSecret,
+    secret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
     /** Access JWT lifetime (jsonwebtoken expiresIn string). Default 15m (SEC-001 P1). */
     expiryTime: jwtExpiryTime,
-    refreshSecret: jwtRefreshSecret,
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'your-refresh-secret-change-in-production',
     refreshExpiryTime: jwtRefreshExpiryTime,
     /** Opaque refresh token TTL in ms (derived from JWT_REFRESH_EXPIRY). */
     refreshExpiryMs: parseDurationToMs(jwtRefreshExpiryTime, 30 * 24 * 60 * 60 * 1000),

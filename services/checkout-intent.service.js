@@ -521,7 +521,7 @@ export class CheckoutIntentService {
       }
     }
 
-    let order = await db().$transaction(async (tx) => {
+    const order = await db().$transaction(async (tx) => {
       const intent = await tx.checkoutIntent.findUnique({
         where: { publicId: checkoutIntentPublicId },
         include: { lines: true },

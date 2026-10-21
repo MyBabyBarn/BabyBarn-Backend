@@ -268,8 +268,6 @@ model User {
   guestPurgedAt      DateTime?
   // When false, customer cannot sign in.
   isActive           Boolean  @default(true)
-  /// Staff invite: true until they set a password from the emailed link.
-  mustChangePassword Boolean  @default(false)
   // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
   adminModules       Json?
   /// ADMIN_TEAM only: when true, may open inbox / receive operational alert emails.
@@ -294,7 +292,7 @@ model MembershipPayment {
   id        Int      @id @default(autoincrement())
   publicId  String   @unique @default(cuid())
   userId    Int
-  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   type      MembershipPaymentType
   amount    Float
   currency  String   @default("usd")
@@ -576,7 +574,7 @@ model CheckoutIntent {
   contactEmail            String?
   placedAsGuest           Boolean              @default(false)
 
-  user  User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   lines CheckoutIntentLine[]
 
   createdAt DateTime @default(now())
@@ -623,8 +621,6 @@ model Order {
   labelGeneratedAt     DateTime?
   outboundShippedAt    DateTime?
   totalAmount Float
-  /// Card cents refunded against this order. totalAmount stays the original sale (PAY-03).
-  refundedAmountCents Int @default(0)
   shippingCost Float @default(0)
   taxAmount    Float @default(0)
   shippingAddressJson Json?
@@ -678,7 +674,7 @@ model Order {
   cancellationRequestReason String?
   cancellationReviewNote    String?
 
-  user       User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
   returnRequests ReturnRequest[]
   returnPackageRequests ReturnPackageRequest[]
@@ -863,7 +859,7 @@ model ReturnRequest {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
   orderItem OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
   refurbishmentJob RefurbishmentJob?
@@ -1315,7 +1311,7 @@ model StoreCreditWallet {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   transactions StoreCreditTransaction[]
 }
 
@@ -1345,27 +1341,9 @@ model StripeWebhookEvent {
   /// PENDING | PROCESSING | PROCESSED | FAILED — only PROCESSED means permanently done (WS-A1).
   status      String    @default("PENDING")
   processedAt DateTime?
-  /// Set when status becomes PROCESSING. A claim older than the lease can be retried (PAY-04).
-  claimedAt   DateTime?
 
   @@index([processedAt])
   @@index([status])
-}
-
-/// PAY-01: a succeeded charge that did not produce an order. OPEN until a later retry fulfills it.
-model PaymentReconciliation {
-  id                     Int      @id @default(autoincrement())
-  publicId               String   @unique @default(cuid())
-  checkoutIntentPublicId String
-  paymentIntentId        String?
-  amountCents            Int?
-  error                  String   @db.Text
-  /// OPEN | RESOLVED
-  status                 String   @default("OPEN")
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
-
-  @@index([checkoutIntentPublicId, status])
 }
 
 /// SCALE-002: multi-instance job ownership. Expired leases can be claimed by any instance.

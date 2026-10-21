@@ -346,19 +346,19 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       ${emailPanel(
         `<table width="100%">${emailInfoRows([
           { label: 'Email', value: context.email },
+          { label: 'Temporary password', value: context.temporaryPassword, bold: true },
         ])}</table>`,
-        { title: 'Account' }
+        { title: 'Sign-in credentials' }
       )}
-      ${context.actionUrl || context.loginUrl ? emailCtaButton(context.actionUrl || context.loginUrl, 'Set your password', 'secondary') : ''}
-      ${context.actionUrl || context.loginUrl ? emailLinkFallback(context.actionUrl || context.loginUrl) : ''}
-      ${emailMutedNote(`Questions about this invite? Contact ${escapeHtml(brand?.supportEmail || 'hello@babybarn.co')}.`)}
-      ${emailMutedNote('This link expires in 24 hours. Choose your own password before signing in. We never email a password.')}
+      ${context.loginUrl ? emailCtaButton(context.loginUrl, 'Open admin console', 'secondary') : ''}
+      ${context.loginUrl ? emailLinkFallback(context.loginUrl) : ''}
+      ${emailMutedNote('Please change your password after your first login.')}
     `;
-    const { html } = doc(subject, 'Set your team password', bodyHtml, brand);
+    const { html } = doc(subject, 'Team account credentials', bodyHtml, brand);
     return {
       subject,
       html,
-      text: `Team account created for ${context.email}. Set your password: ${context.actionUrl || context.loginUrl || ''}`,
+      text: `Team account created. Email: ${context.email}. Temporary password: ${context.temporaryPassword}`,
     };
   }
 

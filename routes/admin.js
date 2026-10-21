@@ -305,11 +305,5 @@ router.patch('/team/:id/modules', authenticate, authorize('ADMIN'), (req, res, n
 router.patch('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.updateTeamMember(req, res).catch(next)
 );
-router.post('/team/:id/resend-invite', authenticate, authorize('ADMIN'), (req, res, next) =>
-  adminController.resendTeamInvite(req, res).catch(next)
-);
-router.delete('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
-  adminController.deleteTeamMember(req, res).catch(next)
-);
 
 export default router;
