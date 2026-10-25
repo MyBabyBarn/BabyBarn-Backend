@@ -156,6 +156,22 @@ app.use(
 app.use('/api', apiLimiter);
 app.use('/api/v1', apiLimiter);
 
+/** SEC-09: redact secrets from logged request paths (tokens, reset links, etc.). */
+function redactLoggedPath(rawPath) {
+  const path = String(rawPath || '');
+  const q = path.indexOf('?');
+  if (q < 0) return path;
+  const base = path.slice(0, q);
+  const params = new URLSearchParams(path.slice(q + 1));
+  for (const key of [...params.keys()]) {
+    if (/token|secret|password|authorization|sig|signature/i.test(key)) {
+      params.set(key, '[redacted]');
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
 /** Log every API request + response status to the terminal (dev-friendly). */
 app.use((req, res, next) => {
   const started = Date.now();
@@ -173,7 +189,7 @@ app.use((req, res, next) => {
     const ms = Date.now() - started;
     const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'log';
     const tag = res.statusCode >= 500 ? 'ERR' : res.statusCode >= 400 ? 'WARN' : 'OK';
-    console[level](`[${tag}] ${req.method} ${path} → ${res.statusCode} (${ms}ms)`);
+    console[level](`[${tag}] ${req.method} ${redactLoggedPath(path)} → ${res.statusCode} (${ms}ms)`);
   });
   next();
 });

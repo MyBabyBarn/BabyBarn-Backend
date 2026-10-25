@@ -227,12 +227,18 @@ async function createPaymentIntentWithOptionalTransfer(stripe, basePayload, dest
         lower.includes('no such destination') ||
         lower.includes('connected account'));
 
+    // PAY-05 / PAY-13: never silently charge without the configured Connect destination.
     if (connectDestinationProblem) {
-      console.warn('[payments] order payment intent fallback without transfer_data', {
+      console.error('[payments] Connect destination rejected — failing closed', {
         destinationAccount,
         stripeCode,
       });
-      return stripe.paymentIntents.create(basePayload);
+      throw new AppError(
+        503,
+        'Payment routing is temporarily unavailable. Please try again later or contact support.',
+        'STRIPE_CONNECT_DESTINATION_INVALID',
+        { stripeCode: stripeCode || null, destinationConfigured: true }
+      );
     }
     throw error;
   }
@@ -640,15 +646,19 @@ async function createCheckoutSessionWithOptionalTransfer(stripe, basePayload, de
         lower.includes('no such destination') ||
         lower.includes('connected account'));
 
+    // PAY-05 / PAY-13: never silently create a session without the configured Connect destination.
     if (connectDestinationProblem) {
-      const fallbackPayload = { ...basePayload };
-      const retrySession = await stripe.checkout.sessions.create(fallbackPayload);
-      console.warn(`[payments] ${flow} checkout fallback without transfer_data`, {
+      console.error(`[payments] ${flow} Connect destination rejected — failing closed`, {
         destinationAccount,
         stripeCode,
         stripeType,
       });
-      return retrySession;
+      throw new AppError(
+        503,
+        'Payment routing is temporarily unavailable. Please try again later or contact support.',
+        'STRIPE_CONNECT_DESTINATION_INVALID',
+        { stripeCode: stripeCode || null, stripeType: stripeType || null, flow }
+      );
     }
 
     throw new AppError(502, rawMessage, 'STRIPE_CHECKOUT_CREATE_FAILED', {
@@ -703,7 +713,7 @@ export async function createMembershipCheckoutSession(userPublicId, opts = {}) {
   } else if (!user.babyName || !user.membershipShippingAddressJson) {
     throw new AppError(
       400,
-      'Complete ACCESS registration (baby name and shipping address) before checkout.'
+      'Complete Farmhouse Friends registration (baby name and shipping address) before checkout.'
     );
   }
 

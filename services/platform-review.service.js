@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { rowsToCsv } from '../lib/csv-safe.js';
 
 function clampRating(value, label) {
   const n = Number(value);
@@ -256,12 +257,6 @@ export async function exportAdminPlatformReviewsCsv() {
     take: 5000,
   });
 
-  const escape = (value) => {
-    const s = value == null ? '' : String(value);
-    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  };
-
   const header = [
     'id',
     'customerName',
@@ -273,23 +268,16 @@ export async function exportAdminPlatformReviewsCsv() {
     'feedback',
     'submittedAt',
   ];
-  const lines = [header.join(',')];
-  for (const row of rows) {
-    lines.push(
-      [
-        row.publicId,
-        displayName(row.user),
-        row.user?.email,
-        row.returnRequest?.returnNumber,
-        row.returnExperienceRating,
-        row.storeCreditExperienceRating,
-        row.overallPlatformRating,
-        row.feedback,
-        row.createdAt?.toISOString?.() || row.createdAt,
-      ]
-        .map(escape)
-        .join(',')
-    );
-  }
-  return lines.join('\n');
+  const data = rows.map((row) => [
+    row.publicId,
+    displayName(row.user),
+    row.user?.email,
+    row.returnRequest?.returnNumber,
+    row.returnExperienceRating,
+    row.storeCreditExperienceRating,
+    row.overallPlatformRating,
+    row.feedback,
+    row.createdAt?.toISOString?.() || row.createdAt,
+  ]);
+  return rowsToCsv(header, data);
 }

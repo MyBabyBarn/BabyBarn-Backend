@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma.js';
+import { rowsToCsv } from '../lib/csv-safe.js';
 
 function buildAuditWhere(filters = {}) {
   const and = [];
@@ -192,22 +193,13 @@ export async function exportAuditLogs(filters = {}, limit = 5000) {
 
 export function auditLogsToCsv(rows) {
   const header = ['createdAt', 'actorEmail', 'action', 'entityType', 'entityId', 'meta'];
-  const escape = (value) => {
-    const s = value == null ? '' : String(value);
-    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  };
-  const lines = rows.map((row) =>
-    [
-      row.createdAt?.toISOString?.() ?? row.createdAt,
-      row.actorEmail ?? '',
-      row.action,
-      row.entityType,
-      row.entityId,
-      row.meta != null ? JSON.stringify(row.meta) : '',
-    ]
-      .map(escape)
-      .join(',')
-  );
-  return [header.join(','), ...lines].join('\r\n');
+  const data = rows.map((row) => [
+    row.createdAt?.toISOString?.() ?? row.createdAt,
+    row.actorEmail ?? '',
+    row.action,
+    row.entityType,
+    row.entityId,
+    row.meta != null ? JSON.stringify(row.meta) : '',
+  ]);
+  return rowsToCsv(header, data);
 }

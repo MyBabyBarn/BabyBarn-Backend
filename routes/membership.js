@@ -101,9 +101,21 @@ router.post('/share/preview', async (req, res, next) => {
       }
     }
     const data = await resolveSharedMembership(req.body?.code, buyerUserId);
+    // SEC-19: anonymous preview returns validity only — no owner PII.
+    const payload = buyerUserId
+      ? {
+          ownerName: data.ownerName,
+          status: data.status,
+          expiresAt: data.expiresAt,
+          accessNumber: data.accessNumber,
+        }
+      : {
+          status: data.status,
+          valid: data.status === 'active' || data.status === 'ok' || Boolean(data.accessNumber),
+        };
     res.status(200).json({
       success: true,
-      data: { ownerName: data.ownerName, status: data.status, expiresAt: data.expiresAt, accessNumber: data.accessNumber },
+      data: payload,
     });
   } catch (e) {
     next(e);
