@@ -32,6 +32,8 @@ export const TEAM_PERMISSION_MODULES = [
   'membership-management',
   'user-management',
   'content-management',
+  // FMA-01 / REQ-02: Activity Log is its own assignable module (not bundled with finance).
+  'activity-log',
 ];
 
 export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
@@ -41,10 +43,11 @@ export const TEAM_PERMISSION_TO_ROUTE_MODULES = {
   'inventory-management': ['inventory', 'inspection'],
   'order-management': ['orders', 'shipping'],
   'returns-refurbishment': ['returns', 'inspection'],
-  'finance-management': ['finance', 'store-credit', 'activity'],
+  'finance-management': ['finance', 'store-credit'],
   'membership-management': ['access'],
   'user-management': ['customers'],
   'content-management': ['homepage', 'blog', 'reviews'],
+  'activity-log': ['activity'],
 };
 
 export function isValidRouteModule(slug) {

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { usdToCents } from '../lib/order-refund-balance.js';
@@ -1621,7 +1622,13 @@ export class OrderService {
 
     const refundAmountUsd = request.refundAmountUsd;
     const amountCents = request.requestedCents;
-    const idempotencyKey = `order-admin-refund-${orderPublicId}-${amountCents}`.slice(0, 255);
+    // PAY-12: each refund attempt needs a unique Stripe idempotency key so two
+    // equal partial refunds on the same order do not silently no-op.
+    const refundAttemptId = crypto.randomBytes(8).toString('hex');
+    const idempotencyKey = `order-admin-refund-${orderPublicId}-${amountCents}-${refundAttemptId}`.slice(
+      0,
+      255
+    );
 
     let refund;
     try {
