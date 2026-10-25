@@ -126,10 +126,19 @@ const authRecoveryLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  // SCL-02: tighter default until a shared Redis store is available.
+  max: Number(process.env.API_RATE_LIMIT_PER_MIN || 120),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests. Try again later.' },
+});
+
+const trackLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many tracking lookups. Try again later.' },
 });
 
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res, next) =>
@@ -155,6 +164,10 @@ app.use(
 );
 app.use('/api', apiLimiter);
 app.use('/api/v1', apiLimiter);
+app.use(
+  ['/api/orders/track', '/api/v1/orders/track', '/api/returns/guest/track', '/api/v1/returns/guest/track'],
+  trackLookupLimiter
+);
 
 /** SEC-09: redact secrets from logged request paths (tokens, reset links, etc.). */
 function redactLoggedPath(rawPath) {

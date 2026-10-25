@@ -9,6 +9,7 @@ import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { PORTAL_SCOPE, findUserByEmailAndPortal, rehomeMisScopedStaffToStaffPortal } from '../lib/portal-scope.js';
 import { buildLegacyAdminPendingCountWhere } from '../lib/order-query-filters.js';
+import { hashAuthToken } from '../lib/auth-token-hash.js';
 
 function isStorefrontCustomerRole(roleName) {
   return roleName === 'CUSTOMER' || roleName === 'USER';
@@ -788,7 +789,7 @@ async function issueTeamSetPasswordEmail(user, roleTitle) {
   await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
   await prisma.passwordResetToken.create({
     data: {
-      token: setPasswordToken,
+      token: hashAuthToken(setPasswordToken),
       userId: user.id,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },

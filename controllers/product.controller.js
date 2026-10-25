@@ -55,7 +55,7 @@ export class ProductController {
 
   async getRefurbSourceCandidates(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const search = req.query.search ? String(req.query.search) : undefined;
     const data = await productService.getRefurbSourceCandidates({ page, limit, search });
     res.status(200).json({ success: true, data: toPublicJson(data) });
@@ -85,7 +85,7 @@ export class ProductController {
 
   async getAllProductsAdmin(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
     const search = req.query.search ? String(req.query.search) : undefined;
     const sizeAgeGroup = req.query.sizeAgeGroup ? String(req.query.sizeAgeGroup) : undefined;

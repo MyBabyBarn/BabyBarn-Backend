@@ -2620,14 +2620,17 @@ export class OrderService {
    * then apply the same pre-shipment cancel rules as authenticated customers.
    */
   async cancelOrderByGuest(payload) {
-    let orderNumber = payload.orderNumber ? String(payload.orderNumber).trim() : '';
-    let email = payload.email ? String(payload.email).trim().toLowerCase() : '';
-
-    if (payload.token) {
-      const verified = verifyOrderTrackingToken(payload.token);
-      orderNumber = verified.orderNumber;
-      email = verified.email;
+    // SEC-08: guest cancel requires the signed tracking token (not order number + email alone).
+    if (!payload.token) {
+      throw new AppError(
+        400,
+        'A tracking link token is required to cancel this order.',
+        'TRACKING_TOKEN_REQUIRED'
+      );
     }
+    const verified = verifyOrderTrackingToken(payload.token);
+    const orderNumber = verified.orderNumber;
+    const email = verified.email;
 
     if (!orderNumber || !email) {
       throw new AppError(400, 'Order number and email are required');

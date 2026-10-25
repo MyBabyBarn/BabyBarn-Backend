@@ -44,7 +44,7 @@ export class InventoryController {
 
   async list(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 24;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 24, 1), 100);
     const search = req.query.search ? String(req.query.search) : undefined;
     const stockStatus = req.query.stockStatus ? String(req.query.stockStatus) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
@@ -97,7 +97,7 @@ export class InventoryController {
 
   async history(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const productId = req.query.productId ? String(req.query.productId) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
     const search = req.query.search ? String(req.query.search).trim() : undefined;

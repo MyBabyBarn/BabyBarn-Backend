@@ -715,6 +715,7 @@ export class ReturnsService {
           where,
           include: returnListInclude,
           orderBy,
+          take: limit,
         });
         return groupReturnRows(rows);
       }
@@ -769,6 +770,7 @@ export class ReturnsService {
         where,
         include: returnListInclude,
         orderBy,
+        take: limit,
       });
     }
 
