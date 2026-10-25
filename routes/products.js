@@ -5,11 +5,12 @@ import { categoryController } from '../controllers/category.controller.js';
 import { reviewController } from '../controllers/review.controller.js';
 import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
 import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
+import { publicCache } from '../middleware/public-cache.js';
 import { productImageUpload } from '../utils/product-upload.js';
 
 const router = Router();
 
-router.get('/', (req, res, next) => productController.getAllProducts(req, res).catch(next));
+router.get('/', publicCache(60), (req, res, next) => productController.getAllProducts(req, res).catch(next));
 
 router.get(
   '/admin',
@@ -56,7 +57,7 @@ router.get(
   requireConsoleModuleAny(['categories', 'products', 'refurbished']),
   (req, res, next) => categoryController.getTree(req, res).catch(next)
 );
-router.get('/categories', (req, res, next) => productController.getAllCategories(req, res).catch(next));
+router.get('/categories', publicCache(120), (req, res, next) => productController.getAllCategories(req, res).catch(next));
 router.post(
   '/categories',
   authenticate,
@@ -84,6 +85,7 @@ router.delete(
 
 router.get(
   '/:id/reviews',
+  publicCache(60),
   (req, res, next) => reviewController.listProductPublic(req, res).catch(next)
 );
 router.get(
@@ -93,7 +95,7 @@ router.get(
   (req, res, next) => reviewController.productEligibility(req, res).catch(next)
 );
 
-router.get('/:id', (req, res, next) => productController.getProductById(req, res).catch(next));
+router.get('/:id', publicCache(30), (req, res, next) => productController.getProductById(req, res).catch(next));
 
 router.post('/upload-image', authenticate, authorize('ADMIN', 'ADMIN_TEAM'), requireConsoleModule('products'), (req, res, next) => {
   productImageUpload.single('image')(req, res, (err) => {

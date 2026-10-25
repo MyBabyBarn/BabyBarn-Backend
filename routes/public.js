@@ -2,8 +2,11 @@ import { Router } from 'express';
 import { getPublicBusinessSettings } from '../services/membership.service.js';
 import { listPublicHomepageCarousel } from '../services/homepage-carousel.service.js';
 import { blogController } from '../controllers/blog.controller.js';
+import { publicCache } from '../middleware/public-cache.js';
 
 const router = Router();
+
+router.use(publicCache(120));
 
 router.get('/business-settings', async (req, res, next) => {
   try {

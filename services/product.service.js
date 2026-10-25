@@ -4,6 +4,7 @@ import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
+import { buildProductSearchOr } from '../lib/product-search.js';
 
 async function wishlistInterestForProducts(productIds) {
   if (!productIds.length) {
@@ -430,15 +431,11 @@ export class ProductService {
           });
         }
         if (search && String(search).trim()) {
-          const q = String(search).trim();
-          where.AND = where.AND ?? [];
-          where.AND.push({
-            OR: [
-              { name: { contains: q, mode: 'insensitive' } },
-              { description: { contains: q, mode: 'insensitive' } },
-              { sku: { contains: q, mode: 'insensitive' } },
-            ],
-          });
+          const or = buildProductSearchOr(search);
+          if (or) {
+            where.AND = where.AND ?? [];
+            where.AND.push({ OR: or });
+          }
         }
         const pf = {};
         if (minPrice != null && Number.isFinite(Number(minPrice))) {
@@ -479,15 +476,11 @@ export class ProductService {
         where.stock = { gt: 0, lt: 10 };
       }
       if (search && String(search).trim()) {
-        const q = String(search).trim();
-        where.AND = where.AND ?? [];
-        where.AND.push({
-          OR: [
-            { name: { contains: q, mode: 'insensitive' } },
-            { description: { contains: q, mode: 'insensitive' } },
-            { sku: { contains: q, mode: 'insensitive' } },
-          ],
-        });
+        const or = buildProductSearchOr(search);
+        if (or) {
+          where.AND = where.AND ?? [];
+          where.AND.push({ OR: or });
+        }
       }
     }
 
@@ -1179,12 +1172,9 @@ export class ProductService {
       isActiveListing: true,
       isDraft: false,
     };
-    const q = search ? String(search).trim() : '';
-    if (q) {
-      where.OR = [
-        { name: { contains: q, mode: 'insensitive' } },
-        { sku: { contains: q, mode: 'insensitive' } },
-      ];
+    const or = buildProductSearchOr(search, { includeDescription: false });
+    if (or) {
+      where.OR = or;
     }
 
     const [products, total] = await Promise.all([

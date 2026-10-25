@@ -465,6 +465,8 @@ model Product {
   @@index([sourceReturnId])
   @@index([sourceProductId])
   @@index([ageGroups])
+  /// SCL-03: supports name/sku prefix lookups (full-text still preferred long-term).
+  @@index([name])
 }
 
 model ProductVariant {
