@@ -12,7 +12,18 @@ import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { PORTAL_SCOPE, findUserByEmailAndPortal, rehomeMisScopedStaffToStaffPortal } from '../lib/portal-scope.js';
-import { buildLegacyAdminPendingCountWhere } from '../lib/order-query-filters.js';
+import {
+  buildLegacyAdminPendingCountWhere,
+  buildPaymentPendingWhere,
+  buildToFulfillWhere,
+  buildPickupReadyWhere,
+  buildShippedWhere,
+} from '../lib/order-query-filters.js';
+import {
+  CUSTOMER_CANCEL_WINDOW_MS,
+  canCustomerCancelOrder,
+  customerCancelWindowEndsAt,
+} from '../lib/customer-order-cancellation.js';
 import { hashAuthToken } from '../lib/auth-token-hash.js';
 
 function isStorefrontCustomerRole(roleName) {
@@ -90,16 +101,52 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
   };
 }
 
-/** Single aggregate for the admin dashboard KPI tiles + alert banners. */
-export async function getDashboardOverview(actor = null) {
+const MS_DAY = 24 * 60 * 60 * 1000;
+
+function startOfLocalDay(d = new Date()) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function dayBuckets(n, end = startOfLocalDay()) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i -= 1) {
+    const start = new Date(end.getTime() - i * MS_DAY);
+    out.push({ start, end: new Date(start.getTime() + MS_DAY) });
+  }
+  return out;
+}
+
+function ageLabel(ts, now = Date.now()) {
+  const m = Math.max(1, Math.round((now - new Date(ts).getTime()) / 60000));
+  if (m < 60) return `${m} min`;
+  if (m < 2880) return `${Math.round(m / 60)} h`;
+  return `${Math.round(m / 1440)} days`;
+}
+
+/**
+ * Admin dashboard — prototype parity (doc 49 / HTML dbView).
+ * Legacy top-level KPI fields kept for older clients; `panels` drives the new UI.
+ */
+export async function getDashboardOverview(actor = null, { range = '7' } = {}) {
   const now = new Date();
+  const nowMs = now.getTime();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const inspectionStatuses = ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'];
+  const todayStart = startOfLocalDay(now);
+  const rangeDays = range === '1' ? 1 : range === '30' ? 30 : 7;
+  const periodStart = new Date(nowMs - rangeDays * MS_DAY);
+  const prevPeriodStart = new Date(periodStart.getTime() - rangeDays * MS_DAY);
+  const endSoonUntil = new Date(nowMs + 14 * MS_DAY);
+  const end30Until = new Date(nowMs + 30 * MS_DAY);
+  const cancelWindowFloor = new Date(nowMs - CUSTOMER_CANCEL_WINDOW_MS);
+  const chartDays = rangeDays >= 30 ? 30 : 14;
+  const inspectionInStatuses = ['RECEIVED', 'UNDER_INSPECTION'];
+  const stdRequested = ['REQUESTED'];
+  const refRequested = ['REQUESTED', 'ELIGIBILITY_REVIEW'];
 
   const { productService } = await import('./product.service.js');
   const { inventoryService } = await import('./inventory.service.js');
   const { canAccessRouteModule } = await import('../constants/admin-modules.js');
+  const { listAuditLogs } = await import('./audit.service.js');
 
   const role = actor?.role;
   const modules = actor?.adminModules;
@@ -112,26 +159,67 @@ export async function getDashboardOverview(actor = null) {
   const wantInventory = can('inventory');
   const wantCustomers = can('customers');
   const wantAccess = can('access');
-  const wantInspection = can('inspection') || can('returns');
+  const wantReturns = can('returns');
+  const wantInspection = can('inspection') || wantReturns;
+  const wantBlog = can('blog');
+  const wantCarousel = can('homepage');
+  const wantReviews = can('reviews');
+  const wantActivity = can('activity') || isAdmin;
+
+  const paidReceivedWhere = {
+    paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED', 'REFUNDED'] },
+    status: { not: 'CANCELLED' },
+  };
 
   const [
     newProductStats,
     refurbishedStats,
     inventoryStats,
-    totalOrders,
-    pendingOrders,
+    totalOrdersAll,
+    legacyPendingOrders,
     ordersThisMonth,
     registeredCustomers,
     activeMembers,
+    membersEndingSoon,
+    membersEnded,
     pendingInspections,
     queuedInspectionsToday,
+    paymentPending,
+    toFulfill,
+    pickupReady,
+    pickupReadyNoLabel,
+    shippedOnWay,
+    cancellationRequests,
+    ordersInPeriod,
+    ordersPrevPeriod,
+    stdRequestedCount,
+    stdInCount,
+    refRequestedCount,
+    refInCount,
+    pendingReturnsCombined,
+    chartOrders,
+    cancelCandidates,
+    stockRiskProducts,
+    blogScheduled,
+    blogPublished,
+    slidesActive,
+    slidesTotal,
+    reviewsWeek,
+    reviewsLowStars,
+    recentLogs,
+    oldestToFulfill,
+    oldestNoLabel,
+    oldestCancelReq,
+    oldestReturnIn,
   ] = await Promise.all([
     wantProducts ? productService.getAdminProductStats('NEW') : Promise.resolve({ total: null }),
     wantProducts || can('refurbished')
       ? productService.getAdminProductStats('REFURBISHED')
       : Promise.resolve({ total: null }),
-    wantInventory ? inventoryService.getStats() : Promise.resolve({ criticalUnderThreshold: null }),
-    wantOrders ? prisma.order.count() : Promise.resolve(null),
+    wantInventory ? inventoryService.getStats() : Promise.resolve({ criticalUnderThreshold: null, outOfStock: null }),
+    wantOrders
+      ? prisma.order.count({ where: paidReceivedWhere })
+      : Promise.resolve(null),
     wantOrders
       ? prisma.order.count({ where: buildLegacyAdminPendingCountWhere() })
       : Promise.resolve(null),
@@ -139,35 +227,458 @@ export async function getDashboardOverview(actor = null) {
       ? prisma.order.count({ where: { createdAt: { gte: monthStart } } })
       : Promise.resolve(null),
     wantCustomers
-      ? prisma.user.count({ where: { role: { name: { in: ['CUSTOMER', 'USER'] } } } })
+      ? prisma.user.count({
+          where: {
+            isGuest: false,
+            role: { name: { in: ['CUSTOMER', 'USER'] } },
+          },
+        })
       : Promise.resolve(null),
     wantAccess
-      ? prisma.user.count({ where: { accessMemberUntil: { gt: now } } })
+      ? prisma.user.count({ where: { accessMemberUntil: { gt: now }, isGuest: false } })
       : Promise.resolve(null),
-    wantInspection
-      ? prisma.returnRequest.count({
-          where: { type: 'REFURBISHMENT', status: { in: inspectionStatuses } },
+    wantAccess
+      ? prisma.user.count({
+          where: {
+            isGuest: false,
+            accessMemberUntil: { gt: now, lte: endSoonUntil },
+          },
+        })
+      : Promise.resolve(null),
+    wantAccess
+      ? prisma.user.count({
+          where: {
+            isGuest: false,
+            accessMemberUntil: { not: null, lte: now },
+          },
         })
       : Promise.resolve(null),
     wantInspection
       ? prisma.returnRequest.count({
-          where: { status: 'UNDER_INSPECTION', createdAt: { gte: todayStart } },
+          where: { type: 'REFURBISHMENT', status: { in: inspectionInStatuses } },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: { status: 'UNDER_INSPECTION', updatedAt: { gte: todayStart } },
+        })
+      : Promise.resolve(null),
+    wantOrders ? prisma.order.count({ where: buildPaymentPendingWhere() }) : Promise.resolve(null),
+    wantOrders ? prisma.order.count({ where: buildToFulfillWhere() }) : Promise.resolve(null),
+    wantOrders ? prisma.order.count({ where: buildPickupReadyWhere() }) : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({
+          where: {
+            AND: [buildPickupReadyWhere(), { trackingNumber: null }, { labelGeneratedAt: null }],
+          },
+        })
+      : Promise.resolve(null),
+    wantOrders ? prisma.order.count({ where: buildShippedWhere() }) : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({ where: { cancellationReviewStatus: 'PENDING' } })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({
+          where: { ...paidReceivedWhere, createdAt: { gte: periodStart } },
+        })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.count({
+          where: {
+            ...paidReceivedWhere,
+            createdAt: { gte: prevPeriodStart, lt: periodStart },
+          },
+        })
+      : Promise.resolve(null),
+    wantReturns
+      ? prisma.returnRequest.count({
+          where: { type: 'STANDARD', status: { in: stdRequested } },
+        })
+      : Promise.resolve(null),
+    wantReturns
+      ? prisma.returnRequest.count({
+          where: { type: 'STANDARD', status: { in: inspectionInStatuses } },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: { type: 'REFURBISHMENT', status: { in: refRequested } },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: { type: 'REFURBISHMENT', status: { in: inspectionInStatuses } },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.count({
+          where: {
+            status: { in: inspectionInStatuses },
+            type: { in: ['STANDARD', 'REFURBISHMENT'] },
+          },
+        })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.findMany({
+          where: {
+            ...paidReceivedWhere,
+            createdAt: { gte: new Date(todayStart.getTime() - (chartDays - 1) * MS_DAY) },
+          },
+          select: { createdAt: true },
+        })
+      : Promise.resolve([]),
+    wantOrders
+      ? prisma.order.findMany({
+          where: {
+            paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED'] },
+            status: { notIn: ['CANCELLED', 'REFUNDED', 'RETURNED', 'SHIPPED', 'DELIVERED'] },
+            fulfillmentStatus: 'ACCEPTED',
+            OR: [
+              { fulfillmentAcceptedAt: { gte: cancelWindowFloor } },
+              { fulfillmentAcceptedAt: null, createdAt: { gte: cancelWindowFloor } },
+            ],
+          },
+          select: {
+            id: true,
+            publicId: true,
+            orderNumber: true,
+            status: true,
+            paymentStatus: true,
+            fulfillmentStatus: true,
+            fulfillmentAcceptedAt: true,
+            createdAt: true,
+            deliveredAt: true,
+            cancellationReviewStatus: true,
+            user: { select: { firstName: true, lastName: true, email: true } },
+            orderItems: { select: { cancelledAt: true } },
+          },
+          orderBy: { fulfillmentAcceptedAt: 'asc' },
+          take: 40,
+        })
+      : Promise.resolve([]),
+    wantInventory
+      ? prisma.product.findMany({
+          where: { isDraft: false },
+          select: {
+            name: true,
+            publicId: true,
+            reorderPoint: true,
+            variants: {
+              select: { sku: true, stock: true, reservedStock: true, combination: true },
+              orderBy: { sortOrder: 'asc' },
+            },
+          },
+          take: 200,
+        })
+      : Promise.resolve([]),
+    wantBlog
+      ? prisma.blogPost.count({ where: { status: 'SCHEDULED', deletedAt: null } })
+      : Promise.resolve(null),
+    wantBlog
+      ? prisma.blogPost.count({ where: { status: 'PUBLISHED', deletedAt: null } })
+      : Promise.resolve(null),
+    wantCarousel
+      ? prisma.homepageCarouselSlide.count({ where: { isActive: true } })
+      : Promise.resolve(null),
+    wantCarousel ? prisma.homepageCarouselSlide.count() : Promise.resolve(null),
+    wantReviews
+      ? prisma.productReview.count({
+          where: {
+            deletedAt: null,
+            createdAt: { gte: new Date(nowMs - 7 * MS_DAY) },
+          },
+        })
+      : Promise.resolve(null),
+    wantReviews
+      ? prisma.productReview.count({
+          where: {
+            deletedAt: null,
+            status: 'APPROVED',
+            rating: { lte: 2 },
+          },
+        })
+      : Promise.resolve(null),
+    wantActivity
+      ? listAuditLogs(1, 6, {}).catch(() => ({ logs: [] }))
+      : Promise.resolve({ logs: [] }),
+    wantOrders
+      ? prisma.order.findFirst({
+          where: buildToFulfillWhere(),
+          orderBy: [{ fulfillmentAcceptedAt: 'asc' }, { createdAt: 'asc' }],
+          select: { fulfillmentAcceptedAt: true, createdAt: true },
+        })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.findFirst({
+          where: {
+            AND: [buildPickupReadyWhere(), { trackingNumber: null }, { labelGeneratedAt: null }],
+          },
+          orderBy: { createdAt: 'asc' },
+          select: { createdAt: true },
+        })
+      : Promise.resolve(null),
+    wantOrders
+      ? prisma.order.findFirst({
+          where: { cancellationReviewStatus: 'PENDING' },
+          orderBy: { updatedAt: 'asc' },
+          select: { updatedAt: true, createdAt: true },
+        })
+      : Promise.resolve(null),
+    wantInspection
+      ? prisma.returnRequest.findFirst({
+          where: { status: { in: inspectionInStatuses } },
+          orderBy: { updatedAt: 'asc' },
+          select: { updatedAt: true, createdAt: true },
         })
       : Promise.resolve(null),
   ]);
 
+  const cancelWindows = (cancelCandidates || [])
+    .filter((o) => canCustomerCancelOrder(o, nowMs))
+    .map((o) => {
+      const endsAt = customerCancelWindowEndsAt(o);
+      const name = [o.user?.firstName, o.user?.lastName].filter(Boolean).join(' ') || o.user?.email || 'Customer';
+      return {
+        id: o.publicId || String(o.id),
+        orderNumber: o.orderNumber || null,
+        customerName: name,
+        endsAt: endsAt ? endsAt.toISOString() : null,
+      };
+    })
+    .sort((a, b) => new Date(a.endsAt || 0).getTime() - new Date(b.endsAt || 0).getTime())
+    .slice(0, 5);
+
+  const buckets = dayBuckets(chartDays, todayStart);
+  const ordersPerDay = buckets.map(({ start, end }) => {
+    const count = (chartOrders || []).filter((o) => {
+      const t = new Date(o.createdAt).getTime();
+      return t >= start.getTime() && t < end.getTime();
+    }).length;
+    return { date: start.toISOString().slice(0, 10), count };
+  });
+
+  let membersEndingByDay = null;
+  if (wantAccess) {
+    const endingMembers = await prisma.user.findMany({
+      where: {
+        isGuest: false,
+        accessMemberUntil: { gt: now, lte: end30Until },
+      },
+      select: { accessMemberUntil: true },
+    });
+    const endBuckets = dayBuckets(30, todayStart);
+    membersEndingByDay = endBuckets.map(({ start, end }) =>
+      endingMembers.filter((m) => {
+        const t = new Date(m.accessMemberUntil).getTime();
+        return t >= start.getTime() && t < end.getTime();
+      }).length
+    );
+  }
+
+  const stockRisk = [];
+  if (wantInventory && Array.isArray(stockRiskProducts)) {
+    for (const p of stockRiskProducts) {
+      const threshold = Number(p.reorderPoint) > 0 ? Number(p.reorderPoint) : 10;
+      for (const v of p.variants || []) {
+        const available = Math.max(0, Number(v.stock || 0) - Number(v.reservedStock || 0));
+        const combo =
+          v.combination && typeof v.combination === 'object'
+            ? Object.values(v.combination).filter(Boolean).join(' · ')
+            : '';
+        let kind = null;
+        if (available <= 0) kind = 'out';
+        else if (available < 3) kind = 'nobuy';
+        else if (available <= threshold) kind = 'low';
+        if (!kind) continue;
+        stockRisk.push({
+          productName: p.name,
+          sku: v.sku,
+          detail: combo || null,
+          available,
+          threshold,
+          kind,
+          hrefId: p.publicId,
+        });
+      }
+    }
+    stockRisk.sort((a, b) => a.available - b.available);
+  }
+
+  const outOrNobuy = stockRisk.filter((l) => l.kind === 'out' || l.kind === 'nobuy').length;
+  const lowOnly = stockRisk.filter((l) => l.kind === 'low').length;
+  const lowStockCount = wantInventory
+    ? Number(inventoryStats.criticalUnderThreshold || 0) + Number(inventoryStats.outOfStock || 0)
+    : null;
+
+  const needsAction = [];
+  if (wantOrders && cancellationRequests > 0) {
+    needsAction.push({
+      key: 'cxr',
+      count: cancellationRequests,
+      label: 'Cancellation requests',
+      detail: oldestCancelReq
+        ? `oldest ${ageLabel(oldestCancelReq.updatedAt || oldestCancelReq.createdAt, nowMs)}`
+        : null,
+      href: '/admin/orders?cancellationReviewStatus=PENDING',
+    });
+  }
+  if (wantOrders && toFulfill > 0) {
+    needsAction.push({
+      key: 'unas',
+      count: toFulfill,
+      label: 'Orders to fulfil',
+      detail: oldestToFulfill
+        ? `oldest ${ageLabel(oldestToFulfill.fulfillmentAcceptedAt || oldestToFulfill.createdAt, nowMs)}`
+        : null,
+      href: '/admin/orders?statusGroup=to_fulfill',
+    });
+  }
+  if (wantOrders && pickupReadyNoLabel > 0) {
+    needsAction.push({
+      key: 'lab',
+      count: pickupReadyNoLabel,
+      label: 'Ready to ship, no label yet',
+      detail: oldestNoLabel ? `oldest ${ageLabel(oldestNoLabel.createdAt, nowMs)}` : null,
+      href: '/admin/orders?statusGroup=pickup_ready',
+    });
+  }
+  if (wantInspection && pendingReturnsCombined > 0) {
+    needsAction.push({
+      key: 'ret',
+      count: pendingReturnsCombined,
+      label: 'Returns received or under inspection',
+      detail: oldestReturnIn
+        ? `oldest ${ageLabel(oldestReturnIn.updatedAt || oldestReturnIn.createdAt, nowMs)}`
+        : null,
+      href: '/admin/returns',
+    });
+  }
+  if (wantInventory && (outOrNobuy + lowOnly) > 0) {
+    needsAction.push({
+      key: 'stk',
+      count: outOrNobuy + lowOnly,
+      label: 'Stock lines out or low',
+      detail: null,
+      href: '/admin/inventory?stockStatus=low_stock',
+    });
+  }
+
+  const periodDeltaPct =
+    wantOrders && ordersPrevPeriod > 0
+      ? Math.round(((ordersInPeriod - ordersPrevPeriod) / ordersPrevPeriod) * 100)
+      : null;
+
+  const spark = ordersPerDay.slice(-14).map((d) => d.count);
+
   return {
-    totalProductsNew: wantProducts ? newProductStats.total : null,
-    totalRefurbished: wantProducts || can('refurbished') ? refurbishedStats.total : null,
-    totalOrders: wantOrders ? totalOrders : null,
-    pendingOrders: wantOrders ? pendingOrders : null,
-    pendingFulfillment: wantOrders ? pendingOrders : null,
+    range: String(rangeDays),
+    generatedAt: now.toISOString(),
+    // Legacy flat KPIs (module-gated nulls)
+    totalProductsNew: wantProducts
+      ? newProductStats.activeListings ?? newProductStats.total
+      : null,
+    totalRefurbished:
+      wantProducts || can('refurbished')
+        ? refurbishedStats.activeListings ?? refurbishedStats.total
+        : null,
+    totalOrders: wantOrders ? totalOrdersAll : null,
+    pendingOrders: wantOrders ? toFulfill : null,
+    pendingFulfillment: wantOrders ? toFulfill : null,
     ordersThisMonth: wantOrders ? ordersThisMonth : null,
     registeredCustomers: wantCustomers ? registeredCustomers : null,
     activeMembers: wantAccess ? activeMembers : null,
     pendingInspections: wantInspection ? pendingInspections : null,
     queuedInspectionsToday: wantInspection ? queuedInspectionsToday : null,
-    lowStockCount: wantInventory ? inventoryStats.criticalUnderThreshold : null,
+    lowStockCount,
+    panels: {
+      needsAction,
+      tiles: {
+        registeredCustomers,
+        activeMembers,
+        membersEndingSoon: wantAccess ? membersEndingSoon : null,
+        newProducts: wantProducts
+          ? newProductStats.activeListings ?? newProductStats.total
+          : null,
+        refurbishedProducts:
+          wantProducts || can('refurbished')
+            ? refurbishedStats.activeListings ?? refurbishedStats.total
+            : null,
+        totalOrders: wantOrders ? totalOrdersAll : null,
+        ordersInPeriod: wantOrders ? ordersInPeriod : null,
+        ordersPrevPeriod: wantOrders ? ordersPrevPeriod : null,
+        periodDeltaPct,
+        spark: wantOrders ? spark : null,
+        pendingOrders: wantOrders ? toFulfill : null,
+        pendingReturns: wantInspection ? pendingReturnsCombined : null,
+        pendingReturnsStandard: wantReturns ? stdInCount : null,
+        pendingReturnsRefurb: wantInspection ? refInCount : null,
+        oldestPendingAge:
+          wantOrders && oldestToFulfill
+            ? ageLabel(oldestToFulfill.fulfillmentAcceptedAt || oldestToFulfill.createdAt, nowMs)
+            : null,
+      },
+      orderFlow: wantOrders
+        ? {
+            paymentPending,
+            toFulfill,
+            readyToShip: pickupReady,
+            readyNoLabel: pickupReadyNoLabel,
+            readyWithLabel: Math.max(0, (pickupReady || 0) - (pickupReadyNoLabel || 0)),
+            shipped: shippedOnWay,
+          }
+        : null,
+      cancelWindows: wantOrders
+        ? { total: cancelWindows.length, items: cancelWindows }
+        : null,
+      ordersPerDay: wantOrders ? { days: chartDays, points: ordersPerDay } : null,
+      stockRisk: wantInventory
+        ? {
+            outOrNotBuyable: outOrNobuy,
+            low: lowOnly,
+            lines: stockRisk.slice(0, 7),
+          }
+        : null,
+      returns: wantInspection
+        ? {
+            standardRequested: wantReturns ? stdRequestedCount : 0,
+            standardIn: wantReturns ? stdInCount : 0,
+            refurbRequested: refRequestedCount,
+            refurbIn: refInCount,
+          }
+        : null,
+      friends: wantAccess
+        ? {
+            active: activeMembers,
+            endingSoon: membersEndingSoon,
+            ended: membersEnded,
+            endingNext30: membersEndingByDay,
+          }
+        : null,
+      content:
+        wantBlog || wantCarousel || wantReviews
+          ? {
+              blogScheduled: wantBlog ? blogScheduled : null,
+              blogPublished: wantBlog ? blogPublished : null,
+              slidesActive: wantCarousel ? slidesActive : null,
+              slidesTotal: wantCarousel ? slidesTotal : null,
+              reviewsLast7Days: wantReviews ? reviewsWeek : null,
+              reviewsLowStars: wantReviews ? reviewsLowStars : null,
+            }
+          : null,
+      recentChanges: wantActivity
+        ? (recentLogs?.logs || []).map((l) => {
+            const byName = [l.actorFirstName, l.actorLastName].filter(Boolean).join(' ');
+            return {
+              id: l.id || l.publicId || String(l.createdAt),
+              text: String(l.action || 'Change').replace(/_/g, ' '),
+              at: l.createdAt,
+              by: byName || l.actorEmail || 'System',
+            };
+          })
+        : null,
+      isAdmin,
+      legacyPendingOrders,
+    },
   };
 }
 

@@ -68,7 +68,9 @@ export class AdminController {
   }
 
   async getDashboardOverview(req, res) {
-    const data = await getDashboardOverview(req.user);
+    const rangeRaw = req.query.range != null ? String(req.query.range) : '7';
+    const range = ['1', '7', '30'].includes(rangeRaw) ? rangeRaw : '7';
+    const data = await getDashboardOverview(req.user, { range });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
