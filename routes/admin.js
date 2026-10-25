@@ -14,8 +14,19 @@ import {
   listAdminSharingActivity,
   updateSharingSettings,
 } from '../services/membership-sharing.service.js';
+import { TEAM_MODULE_ACTIONS } from '../constants/admin-actions.js';
 
 const router = Router();
+
+router.get(
+  '/team/action-catalog',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  (req, res) => {
+    void req;
+    res.status(200).json({ success: true, data: { modules: TEAM_MODULE_ACTIONS } });
+  }
+);
 const homepage = requireConsoleModule('homepage');
 const blog = requireConsoleModule('blog');
 const blogStaff = [authenticate, authorize('ADMIN', 'ADMIN_TEAM'), blog];

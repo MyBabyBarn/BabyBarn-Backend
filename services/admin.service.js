@@ -2,7 +2,11 @@ import { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { AppError } from '../utils/error-handler.js';
-import { normalizeTeamPermissionModules } from '../constants/admin-modules.js';
+import {
+  normalizeTeamPermissionModules,
+  normalizeTeamAccessPayload,
+} from '../constants/admin-modules.js';
+import { serializeAdminAccess } from '../constants/admin-actions.js';
 import { emailService } from './email.service.js';
 import { writeAdminAudit } from './audit.service.js';
 import { config } from '../config/env.js';
@@ -773,7 +777,7 @@ export async function listAdminTeamMembers(actorPublicId) {
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
-      adminModules: user.adminModules,
+      adminModules: serializeAdminAccess(user.adminModules),
       adminNotificationAccess: user.adminNotificationAccess,
       isActive: user.isActive,
       createdAt: user.createdAt,
@@ -834,11 +838,14 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     );
   }
 
-  const normalized = normalizeTeamPermissionModules(modules);
-  if (!normalized || normalized.length === 0) {
+  const accessMap =
+    normalizeTeamAccessPayload(payload.access ?? modules) ||
+    normalizeTeamAccessPayload(normalizeTeamPermissionModules(modules));
+  if (!accessMap || Object.keys(accessMap).length === 0) {
     throw new AppError(400, 'At least one module permission is required');
   }
 
+  const inviteMethod = payload.inviteMethod === 'invite' ? 'invite' : 'temp';
   const hashed = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   let created;
   try {
@@ -851,7 +858,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
         phone: roleTitle,
         roleId: teamRole.id,
         portalScope: PORTAL_SCOPE.STAFF,
-        adminModules: normalized,
+        adminModules: accessMap,
         adminNotificationAccess,
         emailVerifiedAt: new Date(),
         isActive: true,
@@ -884,7 +891,13 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     action: 'TEAM_MEMBER_CREATED',
     entityType: 'User',
     entityId: created.publicId,
-    meta: { modules: normalized, roleTitle, adminNotificationAccess },
+    meta: {
+      modules: Object.keys(accessMap),
+      access: accessMap,
+      roleTitle,
+      adminNotificationAccess,
+      inviteMethod,
+    },
   });
   const createdRow = await prisma.user.findUnique({
     where: { publicId: created.publicId },
@@ -903,7 +916,9 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   }
   return {
     ...created,
+    adminModules: serializeAdminAccess(created.adminModules),
     roleTitle: created.phone || null,
+    inviteMethod,
   };
 }
 
@@ -912,10 +927,13 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
   const teamRole = await prisma.role.findUnique({ where: { name: 'ADMIN_TEAM' } });
   if (!teamRole) throw new AppError(500, 'ADMIN_TEAM role missing');
 
-  const normalized = normalizeTeamPermissionModules(modules);
-  if (!normalized || normalized.length === 0) {
+  const accessMap =
+    normalizeTeamAccessPayload(modules) ||
+    normalizeTeamAccessPayload(normalizeTeamPermissionModules(modules));
+  if (!accessMap || Object.keys(accessMap).length === 0) {
     throw new AppError(400, 'At least one module permission is required');
   }
+  const normalized = Object.keys(accessMap);
 
   const target = await prisma.user.findUnique({
     where: { publicId: targetPublicId },
@@ -927,7 +945,7 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
 
   const updated = await prisma.user.update({
     where: { id: target.id },
-    data: { adminModules: normalized },
+    data: { adminModules: accessMap },
     select: {
       publicId: true,
       email: true,
@@ -945,10 +963,11 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
     action: 'TEAM_MODULES_UPDATED',
     entityType: 'User',
     entityId: updated.publicId,
-    meta: { modules: normalized },
+    meta: { modules: normalized, access: accessMap },
   });
   return {
     ...updated,
+    adminModules: serializeAdminAccess(updated.adminModules),
     roleTitle: updated.phone || null,
   };
 }
@@ -975,12 +994,12 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   if (payload.adminNotificationAccess !== undefined) {
     data.adminNotificationAccess = Boolean(payload.adminNotificationAccess);
   }
-  if (payload.modules !== undefined) {
-    const normalizedModules = normalizeTeamPermissionModules(payload.modules);
-    if (!normalizedModules || normalizedModules.length === 0) {
+  if (payload.modules !== undefined || payload.access !== undefined) {
+    const accessMap = normalizeTeamAccessPayload(payload.access ?? payload.modules);
+    if (!accessMap || Object.keys(accessMap).length === 0) {
       throw new AppError(400, 'At least one module permission is required');
     }
-    data.adminModules = normalizedModules;
+    data.adminModules = accessMap;
   }
 
   const updated = await prisma.user.update({
