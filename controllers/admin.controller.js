@@ -13,6 +13,8 @@ import {
   setTeamMemberModules,
   createAdminTeamMember,
   updateTeamMember,
+  resendTeamInvite,
+  deleteTeamMember,
 } from '../services/admin.service.js';
 import { listStoreCreditActivity as fetchStoreCreditActivity } from '../services/store-credit-admin.service.js';
 import { validate } from '../utils/validation.js';
@@ -171,7 +173,7 @@ export class AdminController {
     const data = await createAdminTeamMember(req.user.id, body);
     res.status(201).json({
       success: true,
-      message: 'Team member created. Ask them to log in again after module changes.',
+      message: 'Invite sent to the email you entered. They set their own password from that message.',
       data: toPublicJson(data),
     });
   }
@@ -180,6 +182,20 @@ export class AdminController {
     const body = await validate(teamMemberUpdateSchema, req.body);
     const data = await updateTeamMember(req.user.id, req.params.id, body);
     res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async resendTeamInvite(req, res) {
+    const data = await resendTeamInvite(req.user.id, req.params.id);
+    res.status(200).json({
+      success: true,
+      message: 'Invite resent to the email on this account.',
+      data: toPublicJson(data),
+    });
+  }
+
+  async deleteTeamMember(req, res) {
+    const data = await deleteTeamMember(req.user.id, req.params.id);
+    res.status(200).json({ success: true, message: data.message, data: toPublicJson(data) });
   }
 }
 
