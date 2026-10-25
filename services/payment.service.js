@@ -87,13 +87,27 @@ async function ensureCheckoutPaymentIntent(stripe, checkoutIntent, user, opts = 
       contactEmail: true,
     },
   });
+  const checkoutIntentPublicId = refreshed?.publicId ?? checkoutIntent.publicId;
   const payable = Number(refreshed?.totalAmount ?? checkoutIntent.totalAmount);
   const amountCents = Math.round(payable * 100);
-  if (amountCents < 50) {
+  // ORD-03: fully store-credit-covered checkouts complete without a Stripe charge.
+  if (amountCents === 0) {
+    const order = await checkoutIntentService.createPaidOrderFromCheckoutIntent(checkoutIntentPublicId, {
+      paymentSucceeded: true,
+      amountReceivedCents: 0,
+    });
+    return {
+      zeroCharge: true,
+      clientSecret: null,
+      paymentIntentId: null,
+      checkoutIntentPublicId,
+      orderPublicId: order?.publicId ?? null,
+      amountCents: 0,
+    };
+  }
+  if (amountCents > 0 && amountCents < 50) {
     throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
   }
-
-  const checkoutIntentPublicId = refreshed?.publicId ?? checkoutIntent.publicId;
   const includeAccessMembership = Boolean(
     refreshed?.includeAccessMembership ?? checkoutIntent.includeAccessMembership
   );
@@ -768,7 +782,21 @@ export async function createOrderCheckoutSession(userPublicId, items, opts = {})
   const cancelUrl = `${config.storeUrl}/checkout/error?reason=cancelled`;
 
   const charge = buildHostedCheckoutCharge(checkoutIntent);
-  if (charge.expectedCents < 50) {
+  // ORD-03: credit-only hosted checkout — no Stripe session.
+  if (charge.expectedCents === 0) {
+    const order = await checkoutIntentService.createPaidOrderFromCheckoutIntent(checkoutIntent.publicId, {
+      paymentSucceeded: true,
+      amountReceivedCents: 0,
+    });
+    return {
+      zeroCharge: true,
+      url: null,
+      sessionId: null,
+      checkoutIntentPublicId: checkoutIntent.publicId,
+      orderPublicId: order?.publicId ?? null,
+    };
+  }
+  if (charge.expectedCents > 0 && charge.expectedCents < 50) {
     throw new AppError(400, 'Order total is below the minimum charge amount', 'ORDER_TOTAL_TOO_LOW');
   }
   const lineItems = charge.lineItems;
@@ -1329,6 +1357,8 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     include: orderInclude,
   });
 
+  // PAY-06: this endpoint is read-only. Fulfilment stays on the Stripe webhook /
+  // reconciliation path so the success page cannot race order creation.
   let session = null;
   if (!order) {
     try {
@@ -1338,80 +1368,25 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     }
 
     const sessionIntentId = getCheckoutIntentPublicId(session?.metadata);
-    const sessionPiId =
-      typeof session?.payment_intent === 'string'
-        ? session.payment_intent
-        : session?.payment_intent?.id;
-    if (sessionIntentId && (session?.payment_status === 'paid' || session?.status === 'complete')) {
-      await handleCheckoutIntentPaymentCompleted(sessionIntentId, {
-        paymentIntentId: sessionPiId || ref,
-        amountReceivedCents: Number.isInteger(session?.amount_total) ? session.amount_total : undefined,
+    if (sessionIntentId) {
+      const intent = await prisma.checkoutIntent.findFirst({
+        where: { publicId: sessionIntentId, userId: user.id },
+        select: { orderPublicId: true },
       });
-      order = await prisma.order.findFirst({
-        where: { userId: user.id, stripePaymentIntentId: ref },
-        include: orderInclude,
-      });
-      if (!order) {
-        const intent = await prisma.checkoutIntent.findUnique({
-          where: { publicId: sessionIntentId },
-          select: { orderPublicId: true },
+      if (intent?.orderPublicId) {
+        order = await prisma.order.findUnique({
+          where: { publicId: intent.orderPublicId, userId: user.id },
+          include: orderInclude,
         });
-        if (intent?.orderPublicId) {
-          order = await prisma.order.findUnique({
-            where: { publicId: intent.orderPublicId, userId: user.id },
-            include: orderInclude,
-          });
-        }
       }
     }
 
     const orderPublicId = session?.metadata?.orderPublicId;
-    // Only fulfill when Stripe confirms payment AND the order belongs to the caller.
-    // Never load/fulfill another user's order before ownership is verified.
-    if (
-      !order &&
-      orderPublicId &&
-      (session?.payment_status === 'paid' || session?.status === 'complete')
-    ) {
+    if (!order && orderPublicId) {
       order = await prisma.order.findUnique({
         where: { publicId: orderPublicId, userId: user.id },
         include: orderInclude,
       });
-      if (order?.paymentStatus === 'UNPAID') {
-        await orderService.fulfillUnpaidOrderAfterPayment(orderPublicId);
-        order = await prisma.order.findUnique({
-          where: { publicId: orderPublicId, userId: user.id },
-          include: orderInclude,
-        });
-      }
-    }
-  }
-
-  if (!order && ref.startsWith('pi_')) {
-    try {
-      const pi = await stripe.paymentIntents.retrieve(ref);
-      const intentId = getCheckoutIntentPublicId(pi.metadata);
-      if (intentId && pi.status === 'succeeded') {
-        await handleCheckoutIntentPaymentCompleted(intentId, { paymentIntentId: ref });
-        order = await prisma.order.findFirst({
-          where: { userId: user.id, stripePaymentIntentId: ref },
-          include: orderInclude,
-        });
-        if (!order) {
-          const intent = await prisma.checkoutIntent.findUnique({
-            where: { publicId: intentId },
-            select: { orderPublicId: true },
-          });
-          if (intent?.orderPublicId) {
-            order = await prisma.order.findUnique({
-              where: { publicId: intent.orderPublicId, userId: user.id },
-              include: orderInclude,
-            });
-          }
-        }
-      }
-    } catch {
-      /* fall through */
     }
   }
 
@@ -1428,7 +1403,18 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
     }
   }
 
-  if (!order || order.userId !== user.id) {
+  if (!order) {
+    return {
+      sessionId: ref,
+      status: 'pending',
+      placedAsGuest: false,
+      trackingUrl: null,
+      order: null,
+      message: 'Payment is confirmed or still processing. Your order will appear when fulfilment finishes.',
+    };
+  }
+
+  if (order.userId !== user.id) {
     throw new AppError(403, 'Unauthorized to access this checkout session');
   }
 
@@ -1470,6 +1456,7 @@ export async function getCheckoutSessionSummary(userPublicId, sessionId) {
 
   return {
     sessionId: ref,
+    status: 'ready',
     placedAsGuest,
     trackingUrl,
     order: {

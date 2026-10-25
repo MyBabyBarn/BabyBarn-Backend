@@ -111,7 +111,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
       ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order', 'secondary') : ''}
       ${context.returnUrl ? emailMutedNote(`Need to start a return? Use this secure link: ${context.returnUrl}`) : ''}
-      ${context.includeReturnEnvelope ? emailMutedNote('As an ACCESS member, your package includes a reusable return envelope for eligible used product returns.') : ''}
+      ${context.includeReturnEnvelope ? emailMutedNote('As a Farmhouse Friends member, your package includes a reusable return envelope for eligible used product returns.') : ''}
       ${emailLinkFallback(context.actionUrl)}
     `;
     const { html } = doc(subject, `Invoice ${context.orderId || ''} — order confirmed`, bodyHtml, brand);
