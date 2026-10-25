@@ -87,6 +87,7 @@ export class ProductController {
     const page = parseInt(String(req.query.page), 10) || 1;
     const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const categoryIds = req.query.categoryIds ? String(req.query.categoryIds) : undefined;
     const search = req.query.search ? String(req.query.search) : undefined;
     const sizeAgeGroup = req.query.sizeAgeGroup ? String(req.query.sizeAgeGroup) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
@@ -96,7 +97,11 @@ export class ProductController {
       search,
       sizeAgeGroup,
       status,
-      productType: productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+      productType:
+        productType === 'NEW' || productType === 'REFURBISHED' || productType === 'all'
+          ? productType
+          : undefined,
+      categoryIds: categoryIds || undefined,
     };
 
     const statsProductType =

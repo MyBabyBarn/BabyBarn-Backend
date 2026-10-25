@@ -452,6 +452,8 @@ export class ProductService {
       const { search, sizeAgeGroup, status, productType } = listFilters;
       if (productType === 'NEW' || productType === 'REFURBISHED') {
         where.productType = productType;
+      } else if (productType === 'all') {
+        /* Categories and similar admin views list new + refurbished together. */
       } else {
         where.productType = 'NEW';
       }
