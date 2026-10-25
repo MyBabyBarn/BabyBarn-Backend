@@ -321,7 +321,7 @@ export class ProductService {
   async getAdminProductStats(productType) {
     const typeWhere =
       productType === 'NEW' || productType === 'REFURBISHED' ? { productType } : {};
-    const [total, activeListings, outOfStock] = await Promise.all([
+    const [total, activeListings, outOfStock, lowStock, drafts, inactive] = await Promise.all([
       prisma.product.count({ where: typeWhere }),
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, isActiveListing: true },
@@ -329,8 +329,17 @@ export class ProductService {
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, stock: 0 },
       }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: false, stock: { gt: 0, lt: 10 } },
+      }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: true },
+      }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: false, isActiveListing: false },
+      }),
     ]);
-    return { total, activeListings, outOfStock };
+    return { total, activeListings, outOfStock, lowStock, drafts, inactive };
   }
 
   /**
@@ -473,9 +482,12 @@ export class ProductService {
         where.isActiveListing = false;
       } else if (st === 'draft') {
         where.isDraft = true;
-      } else if (st === 'low_stock') {
+      } else if (st === 'low_stock' || st === 'low') {
         where.isDraft = false;
         where.stock = { gt: 0, lt: 10 };
+      } else if (st === 'out_of_stock' || st === 'out') {
+        where.isDraft = false;
+        where.stock = 0;
       }
       if (search && String(search).trim()) {
         const or = buildProductSearchOr(search);
@@ -487,7 +499,7 @@ export class ProductService {
     }
 
     let orderBy = { updatedAt: 'desc' };
-    if (!admin && listFilters?.sort) {
+    if (listFilters?.sort) {
       const s = String(listFilters.sort);
       if (s === 'price_asc') orderBy = { price: 'asc' };
       else if (s === 'price_desc') orderBy = { price: 'desc' };
@@ -495,6 +507,8 @@ export class ProductService {
       else if (s === 'name_desc') orderBy = { name: 'desc' };
       else if (s === 'newest') orderBy = { updatedAt: 'desc' };
       else if (s === 'refurbished_newest') orderBy = { refurbishedAt: 'desc' };
+      else if (s === 'stock_asc') orderBy = { stock: 'asc' };
+      else if (s === 'rating_desc') orderBy = { averageRating: 'desc' };
     }
 
     const include = {

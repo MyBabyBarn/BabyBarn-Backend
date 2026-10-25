@@ -92,6 +92,7 @@ export class ProductController {
     const sizeAgeGroup = req.query.sizeAgeGroup ? String(req.query.sizeAgeGroup) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const sort = req.query.sort ? String(req.query.sort) : undefined;
 
     const listFilters = {
       search,
@@ -102,6 +103,7 @@ export class ProductController {
           ? productType
           : undefined,
       categoryIds: categoryIds || undefined,
+      sort: sort || undefined,
     };
 
     const statsProductType =
