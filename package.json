@@ -5,9 +5,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "node --watch index.js",
-    "build": "prisma generate",
-    "start": "node index.js",
+    "dev": "node init && node --watch index.js",
+    "build": "node init && prisma generate",
+    "start": "node init && node index.js",
     "test": "node --test tests/",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

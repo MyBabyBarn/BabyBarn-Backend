@@ -26,9 +26,16 @@ const businessSettingsPatchSchema = z.object({
   accessUsedReturnWindowDays: z.number().int().min(30).max(730).optional(),
 });
 
+const teamAccessSchema = z.union([
+  z.array(z.string()),
+  z.record(z.string(), z.array(z.string())),
+  z.null(),
+]);
+
 const teamModulesPatchSchema = z.object({
-  /** null = full module access for ADMIN_TEAM */
-  modules: z.union([z.array(z.string()), z.null()]),
+  /** Legacy string[] or action map Record<module, actionId[]> */
+  modules: teamAccessSchema,
+  access: z.record(z.string(), z.array(z.string())).optional(),
 });
 
 const teamMemberCreateSchema = z.object({
@@ -36,7 +43,9 @@ const teamMemberCreateSchema = z.object({
   firstName: z.string().min(1).optional().nullable(),
   lastName: z.string().min(1).optional().nullable(),
   roleTitle: z.string().min(1).max(80).optional().nullable(),
-  modules: z.union([z.array(z.string()), z.null()]).optional().default(null),
+  modules: teamAccessSchema.optional().default(null),
+  access: z.record(z.string(), z.array(z.string())).optional(),
+  inviteMethod: z.enum(['temp', 'invite']).optional().default('temp'),
   adminNotificationAccess: z.boolean().optional().default(false),
 });
 
@@ -44,7 +53,8 @@ const teamMemberUpdateSchema = z.object({
   firstName: z.string().min(1).max(80).optional().nullable(),
   lastName: z.string().min(1).max(80).optional().nullable(),
   roleTitle: z.string().min(1).max(80).optional().nullable(),
-  modules: z.union([z.array(z.string()), z.null()]).optional(),
+  modules: teamAccessSchema.optional(),
+  access: z.record(z.string(), z.array(z.string())).optional(),
   isActive: z.boolean().optional(),
   adminNotificationAccess: z.boolean().optional(),
 });
@@ -58,7 +68,9 @@ export class AdminController {
   }
 
   async getDashboardOverview(req, res) {
-    const data = await getDashboardOverview(req.user);
+    const rangeRaw = req.query.range != null ? String(req.query.range) : '7';
+    const range = ['1', '7', '30'].includes(rangeRaw) ? rangeRaw : '7';
+    const data = await getDashboardOverview(req.user, { range });
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
@@ -164,7 +176,11 @@ export class AdminController {
 
   async patchTeamModules(req, res) {
     const body = await validate(teamModulesPatchSchema, req.body);
-    const data = await setTeamMemberModules(req.user.id, req.params.id, body.modules);
+    const data = await setTeamMemberModules(
+      req.user.id,
+      req.params.id,
+      body.access ?? body.modules
+    );
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
