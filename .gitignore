@@ -6,8 +6,6 @@ dist/
 uploads/
 
 # Environment (never commit secrets — keep .env only on EC2)
-.env
-.env.*
 !.env.example
 
 # Logs
@@ -22,7 +20,6 @@ logs/
 # IDE / OS
 .DS_Store
 Thumbs.db
-.vscode/
 .idea/
 *.pem
 *.ppk
