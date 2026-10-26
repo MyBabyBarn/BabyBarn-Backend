@@ -29,6 +29,14 @@ router.get(
   (req, res, next) => inventoryController.history(req, res).catch(next)
 );
 
+router.get(
+  '/history/export.csv',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('inventory'),
+  (req, res, next) => inventoryController.historyExportCsv(req, res).catch(next)
+);
+
 router.post(
   '/adjust',
   authenticate,

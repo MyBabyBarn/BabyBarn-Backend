@@ -115,6 +115,49 @@ export class InventoryController {
     });
   }
 
+  async historyExportCsv(req, res) {
+    const { rowsToCsv } = await import('../lib/csv-safe.js');
+    const productId = req.query.productId ? String(req.query.productId) : undefined;
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const search = req.query.search ? String(req.query.search).trim() : undefined;
+    const result = await inventoryService.listHistory({
+      page: 1,
+      limit: 2000,
+      productPublicId: productId,
+      productType:
+        productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
+      search: search || undefined,
+    });
+    const entries = result.entries || result.rows || [];
+    const header = [
+      'When',
+      'Event',
+      'Product',
+      'SKU',
+      'Delta',
+      'Reference type',
+      'Reference',
+      'Note',
+    ];
+    const rows = entries.map((e) => [
+      e.createdAt,
+      e.eventType,
+      e.product?.name || '',
+      e.variant?.sku || e.productVariant?.sku || e.product?.sku || '',
+      e.quantityChange ?? e.quantityDelta,
+      e.referenceType,
+      e.referenceId,
+      e.reason || e.note || '',
+    ]);
+    const csv = rowsToCsv(header, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="inventory-ledger-${new Date().toISOString().slice(0, 10)}.csv"`
+    );
+    res.status(200).send(`\uFEFF${csv}`);
+  }
+
   async productTimeline(req, res) {
     const data = await inventoryService.getProductTimeline(req.params.id);
     res.status(200).json({ success: true, data: toPublicJson(data) });
