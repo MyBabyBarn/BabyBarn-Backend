@@ -196,6 +196,8 @@ function flattenProductToSkuLines(p) {
       const reservedStock = v.reservedStock ?? 0;
       const availableStock = variantAvailableStock(v);
       const stockStatus = stockStatusFromAvailable(availableStock, p.reorderPoint, p.productType);
+      const price =
+        v.memberPriceOverride ?? v.priceOverride ?? p.memberPrice ?? p.unitPriceAmount ?? null;
       return {
         lineKey: `${p.publicId}:${v.publicId}`,
         productId: p.publicId,
@@ -207,6 +209,9 @@ function flattenProductToSkuLines(p) {
         imageUrl: v.imageUrl || p.imageUrl || null,
         category,
         productType: p.productType,
+        isActiveListing: p.isActiveListing !== false,
+        warehouseLocation: v.warehouseLocation || p.warehouseLocation || null,
+        price,
         reorderPoint: p.reorderPoint ?? null,
         lowStockThreshold: lowStockThresholdFromPar(p.reorderPoint),
         sourceProduct: p.sourceProduct
@@ -226,6 +231,7 @@ function flattenProductToSkuLines(p) {
   const reservedStock = p.reservedStock ?? 0;
   const availableStock = productAvailableStock(p);
   const stockStatus = stockStatusFromAvailable(availableStock, p.reorderPoint, p.productType);
+  const price = p.memberPrice ?? p.unitPriceAmount ?? null;
   return [
     {
       lineKey: `${p.publicId}:simple`,
@@ -238,6 +244,9 @@ function flattenProductToSkuLines(p) {
       imageUrl: p.imageUrl || null,
       category,
       productType: p.productType,
+      isActiveListing: p.isActiveListing !== false,
+      warehouseLocation: p.warehouseLocation || null,
+      price,
       reorderPoint: p.reorderPoint ?? null,
       lowStockThreshold: lowStockThresholdFromPar(p.reorderPoint),
       sourceProduct: p.sourceProduct
@@ -268,12 +277,16 @@ export class InventoryService {
       include: { variants: { orderBy: { sortOrder: 'asc' } } },
     });
     let totalSkus = 0;
+    let totalUnits = 0;
     let critical = 0;
     let outOfStock = 0;
+    let inactive = 0;
     for (const p of products) {
       const lines = flattenProductToSkuLines(p);
       for (const line of lines) {
         totalSkus += 1;
+        totalUnits += Number(line.totalStock) || 0;
+        if (line.isActiveListing === false) inactive += 1;
         const t = line.availableStock ?? line.totalStock;
         if (t <= 0 || line.stockStatus === 'out_of_stock') outOfStock += 1;
         else if (line.stockStatus === 'low_stock') critical += 1;
@@ -281,8 +294,10 @@ export class InventoryService {
     }
     return {
       totalSkus,
+      totalUnits,
       criticalUnderThreshold: critical,
       outOfStock,
+      inactive,
       lowStockThreshold: LOW_STOCK_THRESHOLD,
     };
   }
@@ -340,6 +355,16 @@ export class InventoryService {
 
     const filtered = flat.filter((line) => {
       if (!stockStatusFilter || stockStatusFilter === 'all') return true;
+      if (stockStatusFilter === 'inactive') return line.isActiveListing === false;
+      if (stockStatusFilter === 'low_stock') {
+        return line.isActiveListing !== false && line.stockStatus === 'low_stock';
+      }
+      if (stockStatusFilter === 'out_of_stock') {
+        return line.isActiveListing !== false && line.stockStatus === 'out_of_stock';
+      }
+      if (stockStatusFilter === 'in_stock') {
+        return line.isActiveListing !== false && line.stockStatus === 'in_stock';
+      }
       return line.stockStatus === stockStatusFilter;
     });
 
@@ -500,7 +525,14 @@ export class InventoryService {
   async getProductTimeline(productPublicId) {
     const product = await prisma.product.findUnique({
       where: { publicId: productPublicId },
-      select: { id: true, publicId: true, name: true },
+      select: {
+        id: true,
+        publicId: true,
+        name: true,
+        stock: true,
+        reservedStock: true,
+        reorderPoint: true,
+      },
     });
     if (!product) throw new AppError(404, 'Product not found');
 
@@ -525,7 +557,13 @@ export class InventoryService {
     ]);
 
     return {
-      product: { id: product.publicId, name: product.name },
+      product: {
+        id: product.publicId,
+        name: product.name,
+        stock: product.stock,
+        reservedStock: product.reservedStock,
+        reorderPoint: product.reorderPoint,
+      },
       ledger: ledgerResult.entries.map((e) => ({
         id: e.id,
         eventType: e.eventType,
@@ -573,7 +611,11 @@ export class InventoryService {
   async getProductOverview(productPublicId) {
     const product = await prisma.product.findUnique({
       where: { publicId: productPublicId },
-      include: { variants: { orderBy: { sortOrder: 'asc' } } },
+      include: {
+        category: { select: { publicId: true, name: true, slug: true } },
+        variants: { orderBy: { sortOrder: 'asc' } },
+        barcodes: { select: { code: true, productVariantId: true, publicId: true } },
+      },
     });
     if (!product) throw new AppError(404, 'Product not found');
 
@@ -767,13 +809,46 @@ export class InventoryService {
 
     activity.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+    const variants = (product.variants || []).map((v) => {
+      const reservedStock = v.reservedStock ?? 0;
+      const availableStock = variantAvailableStock(v);
+      const barcodeCode =
+        (product.barcodes || []).find((b) => b.productVariantId === v.id)?.code ?? null;
+      return {
+        id: v.publicId,
+        sku: v.sku,
+        label: combinationLabel(v.combination),
+        stock: v.stock,
+        reservedStock,
+        availableStock,
+        stockStatus: stockStatusFromAvailable(availableStock, product.reorderPoint, product.productType),
+        warehouseLocation: v.warehouseLocation || null,
+        imageUrl: v.imageUrl || null,
+        barcodeCode,
+        price: v.memberPriceOverride ?? v.priceOverride ?? product.memberPrice ?? product.unitPriceAmount ?? null,
+      };
+    });
+
     return {
       product: {
         id: product.publicId,
         name: product.name,
         sku: product.sku,
         productType: product.productType,
+        imageUrl: product.imageUrl || null,
+        isActiveListing: product.isActiveListing !== false,
+        reorderPoint: product.reorderPoint ?? null,
+        warehouseLocation: product.warehouseLocation || null,
+        price: product.memberPrice ?? product.unitPriceAmount ?? null,
+        stock: product.stock,
+        reservedStock: product.reservedStock ?? 0,
+        availableStock: currentAvailable,
+        barcodeCode: (product.barcodes || []).find((b) => b.productVariantId == null)?.code ?? null,
+        category: product.category
+          ? { id: product.category.publicId, name: product.category.name, slug: product.category.slug }
+          : null,
       },
+      variants,
       kpis: {
         totalInventoryReceived: totalReceived,
         totalSold,
@@ -782,6 +857,7 @@ export class InventoryService {
         totalMovedToRefurbishment: totalMovedToRefurb,
         totalDiscarded,
         currentAvailableInventory: currentAvailable,
+        manualAdjustments: Math.abs(Number(signedByType.ADJUST || 0)),
       },
       activity: activity.slice(0, 100),
     };

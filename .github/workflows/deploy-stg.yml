@@ -1,0 +1,28 @@
+# Staging only (DigitalOcean). Production master → EC2 stays separate.
+name: Deploy staging (DigitalOcean)
+
+on:
+  push:
+    branches: [stg]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stg-backend
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy staging over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STG_HOST }}
+          username: ${{ secrets.STG_USER }}
+          key: ${{ secrets.STG_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.STG_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export STG_BASE="${{ secrets.STG_BASE || '/var/www' }}"
+            bash "$STG_BASE/BabyBarn-Backend/deploy/stg/deploy-all-stg.sh"

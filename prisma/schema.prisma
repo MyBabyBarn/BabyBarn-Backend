@@ -416,6 +416,11 @@ model Product {
   sizeAgeGroup         String?
   ageGroups            String[]    @default([])
   vendor               String?
+  /// Optional storefront attributes from the product editor (Girl | Boy | Unisex).
+  gender               String?
+  /// Hex colour, e.g. #A9C5A0.
+  colour               String?
+  colourName           String?
   /// Warehouse aisle / bin for simple SKUs (variant uses ProductVariant.warehouseLocation).
   warehouseLocation    String?
   tags                 String?

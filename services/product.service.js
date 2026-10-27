@@ -321,7 +321,7 @@ export class ProductService {
   async getAdminProductStats(productType) {
     const typeWhere =
       productType === 'NEW' || productType === 'REFURBISHED' ? { productType } : {};
-    const [total, activeListings, outOfStock, lowStock, drafts, inactive] = await Promise.all([
+    const [total, activeListings, outOfStock, lowStock, drafts, inactive, fromReturns] = await Promise.all([
       prisma.product.count({ where: typeWhere }),
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, isActiveListing: true },
@@ -338,8 +338,27 @@ export class ProductService {
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, isActiveListing: false },
       }),
+      prisma.product.count({
+        where: { ...typeWhere, sourceReturnId: { not: null } },
+      }),
     ]);
-    return { total, activeListings, outOfStock, lowStock, drafts, inactive };
+    return { total, activeListings, outOfStock, lowStock, drafts, inactive, fromReturns };
+  }
+
+  async listDistinctVendors(productType) {
+    const type =
+      productType === 'REFURBISHED' ? 'REFURBISHED' : productType === 'NEW' ? 'NEW' : undefined;
+    const rows = await prisma.product.findMany({
+      where: {
+        ...(type ? { productType: type } : {}),
+        vendor: { not: null },
+      },
+      distinct: ['vendor'],
+      select: { vendor: true },
+      orderBy: { vendor: 'asc' },
+      take: 80,
+    });
+    return rows.map((row) => row.vendor).filter((name) => Boolean(name && String(name).trim()));
   }
 
   /**
@@ -458,7 +477,7 @@ export class ProductService {
         }
       }
     } else if (listFilters) {
-      const { search, sizeAgeGroup, status, productType } = listFilters;
+      const { search, sizeAgeGroup, status, productType, vendor, missingImage, refurbSource, conditionGrade } = listFilters;
       if (productType === 'NEW' || productType === 'REFURBISHED') {
         where.productType = productType;
       } else if (productType === 'all') {
@@ -488,6 +507,30 @@ export class ProductService {
       } else if (st === 'out_of_stock' || st === 'out') {
         where.isDraft = false;
         where.stock = 0;
+      }
+      if (vendor === 'none') {
+        where.AND = where.AND ?? [];
+        where.AND.push({ OR: [{ vendor: null }, { vendor: '' }] });
+      } else if (vendor && String(vendor).trim() && String(vendor) !== 'all') {
+        where.vendor = String(vendor).trim();
+      }
+      if (refurbSource === 'return') {
+        where.sourceReturnId = { not: null };
+      } else if (refurbSource === 'new') {
+        where.sourceReturnId = null;
+        where.sourceProductId = { not: null };
+      } else if (refurbSource === 'solo') {
+        where.sourceReturnId = null;
+        where.sourceProductId = null;
+      }
+      if (conditionGrade === 'none') {
+        where.conditionGrade = null;
+      } else if (conditionGrade === 'A' || conditionGrade === 'B' || conditionGrade === 'C') {
+        where.conditionGrade = conditionGrade;
+      }
+      if (missingImage === true || missingImage === '1' || missingImage === 'true') {
+        where.AND = where.AND ?? [];
+        where.AND.push({ OR: [{ imageUrl: null }, { imageUrl: '' }] });
       }
       if (search && String(search).trim()) {
         const or = buildProductSearchOr(search);
@@ -528,7 +571,10 @@ export class ProductService {
         },
       },
       ...(admin
-        ? { variants: { orderBy: { sortOrder: 'asc' } } }
+        ? {
+            variants: { orderBy: { sortOrder: 'asc' } },
+            sourceReturn: { select: { publicId: true, returnNumber: true } },
+          }
         : {
             variants: {
               orderBy: { sortOrder: 'asc' },
@@ -726,6 +772,9 @@ export class ProductService {
       reorderPoint,
       sizeAgeGroup,
       vendor,
+      gender,
+      colour,
+      colourName,
       tags,
       isActiveListing = true,
       productType = 'NEW',
@@ -856,6 +905,9 @@ export class ProductService {
           sizeAgeGroup: sizeAgeGroup ?? null,
           ageGroups: computeAgeGroups(isVariantProduct, variants, sizeAgeGroup),
           vendor: vendor ?? null,
+          gender: gender === 'Girl' || gender === 'Boy' || gender === 'Unisex' ? gender : null,
+          colour: typeof colour === 'string' && /^#[0-9A-Fa-f]{6}$/.test(colour.trim()) ? colour.trim().toUpperCase() : null,
+          colourName: colourName?.trim() || null,
           tags: tags ?? null,
           isDraft,
           isActiveListing: listingActive,
@@ -947,6 +999,14 @@ export class ProductService {
 
     const updated = await prisma.$transaction(async (tx) => {
       const updatePayload = { ...rest };
+      if (updatePayload.gender === '') updatePayload.gender = null;
+      if (updatePayload.colour === '') updatePayload.colour = null;
+      else if (typeof updatePayload.colour === 'string') {
+        updatePayload.colour = /^#[0-9A-Fa-f]{6}$/.test(updatePayload.colour.trim())
+          ? updatePayload.colour.trim().toUpperCase()
+          : null;
+      }
+      if (updatePayload.colourName === '') updatePayload.colourName = null;
 
       if (isSkuCategoryLockedRefurb) {
         delete updatePayload.productType;
