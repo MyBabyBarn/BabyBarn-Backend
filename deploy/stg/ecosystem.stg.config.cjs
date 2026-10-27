@@ -1,4 +1,4 @@
-/** PM2 staging (DigitalOcean) — separate names from production. */
+/** PM2 staging (AWS staging EC2) — separate names from production. */
 const base = process.env.STG_BASE || "/var/www";
 
 module.exports = {

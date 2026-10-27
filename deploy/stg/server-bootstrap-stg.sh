@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One-time Ubuntu bootstrap for MyBABY BARN staging on DigitalOcean.
-# Isolates staging from production EC2. Safe to re-run.
+# One-time Ubuntu bootstrap for MyBABY BARN staging on AWS (separate EC2).
+# Isolates staging from production EC2 (13.218.44.12). Safe to re-run.
+# See docs/STAGING-AWS.md
 set -euo pipefail
 
 ORG="${GITHUB_ORG:-MyBabyBarn}"
