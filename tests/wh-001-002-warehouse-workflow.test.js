@@ -1,14 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '../..');
+const backendRoot = join(__dirname, '..');
+const monoRoot = join(__dirname, '../..');
+const isMonorepo = existsSync(join(monoRoot, 'admin-fe'));
+const root = isMonorepo ? monoRoot : backendRoot;
 
 function read(rel) {
-  return readFileSync(join(root, rel), 'utf8');
+  const path =
+    !isMonorepo && rel.startsWith('backend/') ? rel.slice('backend/'.length) : rel;
+  return readFileSync(join(root, path), 'utf8');
+}
+
+function hasSibling(name) {
+  return isMonorepo && existsSync(join(monoRoot, name));
 }
 
 /** Mirrors admin-fe draftReadyForHappyPathSettle (WH-001). */
@@ -111,7 +120,7 @@ test('WH-001: Approve & Settle already consolidates approve→refund→restock (
   assert.ok(refundIdx > 0 && restockIdx > refundIdx);
 });
 
-test('WH-001: FE card exposes save-then-settle to remove Complete→Settle double click', () => {
+test('WH-001: FE card exposes save-then-settle to remove Complete→Settle double click', { skip: !hasSibling('admin-fe') }, () => {
   const card = read(
     'admin-fe/components/admin/returns/standard/ReturnProductInspectCard.tsx'
   );
@@ -144,7 +153,7 @@ test('WH-002: Standard APPROVED ≠ Refurb APPROVED in display labels', () => {
   );
 });
 
-test('WH-002: refurb pipeline labels no longer use cryptic Physical/Credit', () => {
+test('WH-002: refurb pipeline labels no longer use cryptic Physical/Credit', { skip: !hasSibling('admin-fe') }, () => {
   const src = read('admin-fe/lib/refurb-inspection.ts');
   assert.ok(src.includes("UNDER_INSPECTION: 'Physical inspection'"));
   assert.ok(src.includes("INSPECTION_APPROVED: 'Inspection approved — product accepted'"));
@@ -153,13 +162,13 @@ test('WH-002: refurb pipeline labels no longer use cryptic Physical/Credit', () 
   assert.equal(/INSPECTION_APPROVED:\s*'Credit'/.test(src), false);
 });
 
-test('WH-002: admin returns list uses type-aware status chips', () => {
+test('WH-002: admin returns list uses type-aware status chips', { skip: !hasSibling('admin-fe') }, () => {
   const page = read('admin-fe/app/(private)/admin/(console)/returns/page.tsx');
   assert.ok(page.includes('formatAdminReturnStatusChip'));
   assert.equal(/row\.status\.replace\(\/_\/g/.test(page), false);
 });
 
-test('WH-002: package receive CTA states package scope', () => {
+test('WH-002: package receive CTA states package scope', { skip: !hasSibling('admin-fe') }, () => {
   const actions = read('admin-fe/components/admin/inspection/AdminRefurbReturnActions.tsx');
   const items = read('admin-fe/components/admin/inspection/AdminRefurbSubmissionItems.tsx');
   assert.ok(actions.includes('Mark package received (all items)'));
@@ -167,7 +176,7 @@ test('WH-002: package receive CTA states package scope', () => {
   assert.ok(items.includes('Receives the whole package'));
 });
 
-test('WH-001/002: no new financial or inventory bypass in FE settle path', () => {
+test('WH-001/002: no new financial or inventory bypass in FE settle path', { skip: !hasSibling('admin-fe') }, () => {
   const detail = read(
     'admin-fe/components/admin/returns/standard/StandardReturnDetailView.tsx'
   );

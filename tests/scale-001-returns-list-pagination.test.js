@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -375,7 +375,9 @@ test('SCALE-001: listAll no longer slices after full fat fetch when limit set', 
   assert.equal(/rows\.filter\(\(row\)\s*=>\s*\{[\s\S]*hay\.includes\(search\)/.test(listAllBody), false);
 });
 
-test('SCALE-001: admin FE returns page requests page/limit (no client slice of full set)', () => {
+test('SCALE-001: admin FE returns page requests page/limit (no client slice of full set)', {
+  skip: !existsSync(join(__dirname, '../../admin-fe')),
+}, () => {
   const pageSrc = readFileSync(
     join(__dirname, '../../admin-fe/app/(private)/admin/(console)/returns/page.tsx'),
     'utf8'
@@ -386,7 +388,9 @@ test('SCALE-001: admin FE returns page requests page/limit (no client slice of f
   assert.equal(/filtered\.slice\(/.test(pageSrc), false);
 });
 
-test('SCALE-001: inspection page requests server pagination + statuses', () => {
+test('SCALE-001: inspection page requests server pagination + statuses', {
+  skip: !existsSync(join(__dirname, '../../admin-fe')),
+}, () => {
   const pageSrc = readFileSync(
     join(__dirname, '../../admin-fe/app/(private)/admin/(console)/inspection/page.tsx'),
     'utf8'
@@ -398,7 +402,9 @@ test('SCALE-001: inspection page requests server pagination + statuses', () => {
   assert.equal(/groupQueueRows/.test(pageSrc), false);
 });
 
-test('SCALE-001: alert counts use /returns/admin/stats not full list', () => {
+test('SCALE-001: alert counts use /returns/admin/stats not full list', {
+  skip: !existsSync(join(__dirname, '../../admin-fe')),
+}, () => {
   const src = readFileSync(join(__dirname, '../../admin-fe/lib/hooks/use-admin-alert-counts.ts'), 'utf8');
   assert.ok(src.includes('/returns/admin/stats'));
   assert.equal(src.includes('/returns/admin/all'), false);

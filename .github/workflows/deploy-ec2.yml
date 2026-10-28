@@ -21,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       # OPS-01: block deploy when the suite fails (same gate as CI).
+      # FE-coupled contract tests auto-skip when sibling repos are absent.
       - name: Run tests
         run: npm test
 

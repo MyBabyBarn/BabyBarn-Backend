@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -101,17 +101,20 @@ test('RBAC-001: store-credit activity route uses store-credit module only (not r
   const returnsRoutes = readFileSync(join(__dirname, '../routes/returns.js'), 'utf8');
   assert.doesNotMatch(returnsRoutes, /store-credit/);
 
-  // FE must not call broad returns list for this page
-  const storeCreditPage = readFileSync(
-    join(__dirname, '../../admin-fe/app/(private)/admin/(console)/store-credit/page.tsx'),
-    'utf8'
+  // FE must not call broad returns list for this page (monorepo-only check)
+  const storeCreditPagePath = join(
+    __dirname,
+    '../../admin-fe/app/(private)/admin/(console)/store-credit/page.tsx'
   );
-  assert.match(storeCreditPage, /\/admin\/store-credit\/activity/);
-  assert.equal(
-    /client\.get[^;]*\/returns\/admin\/all/.test(storeCreditPage),
-    false,
-    'store-credit page must not call returns admin list'
-  );
+  if (existsSync(storeCreditPagePath)) {
+    const storeCreditPage = readFileSync(storeCreditPagePath, 'utf8');
+    assert.match(storeCreditPage, /\/admin\/store-credit\/activity/);
+    assert.equal(
+      /client\.get[^;]*\/returns\/admin\/all/.test(storeCreditPage),
+      false,
+      'store-credit page must not call returns admin list'
+    );
+  }
 });
 
 test('RBAC-001: finance-management does not accidentally gain returns via mapping expansion', () => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcryptjs';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDurationToMs } from '../lib/duration.js';
@@ -229,7 +229,9 @@ test('SEC-001 P1: logout without access JWT still revokes refresh', async () => 
   }
 });
 
-test('SEC-001 P1: FE/API contract — admin stores refresh; logout route unauthenticated; no cookie auth', () => {
+test('SEC-001 P1: FE/API contract — admin stores refresh; logout route unauthenticated; no cookie auth', {
+  skip: !existsSync(join(__dirname, '../../admin-fe')) || !existsSync(join(__dirname, '../../customer-fe')),
+}, () => {
   const adminStore = readFileSync(join(__dirname, '../../admin-fe/lib/stores/auth.store.ts'), 'utf8');
   assert.match(adminStore, /setStoredRefreshToken/);
   assert.match(adminStore, /refreshToken/);

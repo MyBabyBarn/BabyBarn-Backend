@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { postPaymentFulfillmentFields } from '../lib/order-fulfillment-start.js';
@@ -85,7 +85,9 @@ test('ORD-001 P1: cancel blocked after PICKUP_READY even inside time window', ()
   );
 });
 
-test('ORD-001 P1: pick-wave eligibility still treats ACCEPTED and legacy NEW_ORDER as pre-pick', () => {
+test('ORD-001 P1: pick-wave eligibility still treats ACCEPTED and legacy NEW_ORDER as pre-pick', {
+  skip: !existsSync(join(__dirname, '../../admin-fe')),
+}, () => {
   const adminFe = readFileSync(
     join(__dirname, '../../admin-fe/lib/admin-order-fulfillment.ts'),
     'utf8'
