@@ -1,0 +1,29 @@
+# Staging only — AWS staging EC2. Does not deploy production.
+name: Deploy staging (AWS)
+
+on:
+  push:
+    branches: [stg]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stg-backend
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy staging over SSH
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.STG_HOST }}
+          username: ${{ secrets.STG_USER }}
+          key: ${{ secrets.STG_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.STG_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export STG_BASE="${{ secrets.STG_BASE }}"
+            if [ -z "$STG_BASE" ]; then STG_BASE="/var/www"; fi
+            bash "$STG_BASE/BabyBarn-Backend/deploy/stg/deploy-all-stg.sh"

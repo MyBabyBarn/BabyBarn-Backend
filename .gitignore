@@ -9,6 +9,7 @@ uploads/
 .env
 .env.*
 !.env.example
+!.env.stg.example
 
 # Logs
 *.log

@@ -1,0 +1,275 @@
+# MyBABY BARN — Staging EC2 (isolated from production)
+# Stack: MyBabyBarn-Staging
+#
+#   aws cloudformation deploy \
+#     --stack-name MyBabyBarn-Staging \
+#     --template-file deploy/stg/aws/stg-ec2.yaml \
+#     --parameter-overrides KeyName=YOUR_KEY_PAIR AllowedSshCidr=YOUR.IP.0.0/32 \
+#     --capabilities CAPABILITY_NAMED_IAM
+#
+# Set CreateDatabase=true for a separate RDS Postgres (recommended).
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: MyBABY BARN staging Ubuntu EC2 + optional RDS — separate from production
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH (staging only — do not reuse production key if possible)
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+  AllowedSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Prefer your office/VPN CIDR
+  CreateDatabase:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  DbUsername:
+    Type: String
+    Default: stg_user
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: Staging DB password (never reuse production)
+  DbName:
+    Type: String
+    Default: babybarn_stg
+
+Conditions:
+  WantDb: !Equals [!Ref CreateDatabase, "true"]
+
+Resources:
+  StgVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.80.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-vpc }
+        - { Key: Project, Value: MyBabyBarn }
+        - { Key: Env, Value: staging }
+
+  StgInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-igw }
+        - { Key: Env, Value: staging }
+
+  StgAttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref StgVpc
+      InternetGatewayId: !Ref StgInternetGateway
+
+  StgPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref StgVpc
+      CidrBlock: 10.80.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-public-a }
+        - { Key: Env, Value: staging }
+
+  StgPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: WantDb
+    Properties:
+      VpcId: !Ref StgVpc
+      CidrBlock: 10.80.11.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-private-a }
+        - { Key: Env, Value: staging }
+
+  StgPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: WantDb
+    Properties:
+      VpcId: !Ref StgVpc
+      CidrBlock: 10.80.12.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-private-b }
+        - { Key: Env, Value: staging }
+
+  StgPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref StgVpc
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-public-rt }
+        - { Key: Env, Value: staging }
+
+  StgPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: StgAttachIgw
+    Properties:
+      RouteTableId: !Ref StgPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref StgInternetGateway
+
+  StgPublicSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref StgPublicSubnet
+      RouteTableId: !Ref StgPublicRouteTable
+
+  StgSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MyBABY BARN staging web + SSH
+      VpcId: !Ref StgVpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AllowedSshCidr }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-sg }
+        - { Key: Env, Value: staging }
+
+  StgDbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: WantDb
+    Properties:
+      GroupDescription: Staging Postgres — only from staging EC2
+      VpcId: !Ref StgVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref StgSecurityGroup
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-db-sg }
+        - { Key: Env, Value: staging }
+
+  StgDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Condition: WantDb
+    Properties:
+      DBSubnetGroupDescription: Staging Postgres subnets
+      SubnetIds: [!Ref StgPrivateSubnet, !Ref StgPrivateSubnetB]
+      Tags:
+        - { Key: Env, Value: staging }
+
+  StgDatabase:
+    Type: AWS::RDS::DBInstance
+    Condition: WantDb
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: mybabybarn-stg-pg
+      Engine: postgres
+      EngineVersion: "16"
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBName: !Ref DbName
+      VPCSecurityGroups: [!Ref StgDbSecurityGroup]
+      DBSubnetGroupName: !Ref StgDbSubnetGroup
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 3
+      PreferredBackupWindow: "05:00-06:00"
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-pg }
+        - { Key: Project, Value: MyBabyBarn }
+        - { Key: Env, Value: staging }
+
+  StgInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: mybabybarn-stg-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: Env, Value: staging }
+
+  StgInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref StgInstanceRole]
+
+  StgInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref StgInstanceProfile
+      SubnetId: !Ref StgPublicSubnet
+      SecurityGroupIds: [!Ref StgSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 40
+            VolumeType: gp3
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y git curl ca-certificates
+          echo "MyBABY BARN staging host — run deploy/stg/server-bootstrap-stg.sh after clone" > /etc/motd
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg }
+        - { Key: Project, Value: MyBabyBarn }
+        - { Key: Env, Value: staging }
+        - { Key: Role, Value: staging-app }
+
+  StgElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: mybabybarn-stg-eip }
+        - { Key: Env, Value: staging }
+
+  StgEipAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref StgInstance
+      AllocationId: !GetAtt StgElasticIp.AllocationId
+
+Outputs:
+  StagingPublicIp:
+    Description: Point stg.mybabybarn.com / admin.stg / api.stg A records here
+    Value: !Ref StgElasticIp
+  StagingInstanceId:
+    Value: !Ref StgInstance
+  StagingSshHint:
+    Value: !Sub "ssh -i YOUR_KEY.pem ubuntu@${StgElasticIp}"
+  StagingDbEndpoint:
+    Condition: WantDb
+    Value: !GetAtt StgDatabase.Endpoint.Address
+  StagingDbPort:
+    Condition: WantDb
+    Value: !GetAtt StgDatabase.Endpoint.Port
+  IsolationReminder:
+    Value: Never use production DATABASE_URL, Stripe live keys, or production JWT on this host.

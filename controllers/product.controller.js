@@ -93,11 +93,19 @@ export class ProductController {
     const status = req.query.status ? String(req.query.status) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
     const sort = req.query.sort ? String(req.query.sort) : undefined;
+    const vendor = req.query.vendor ? String(req.query.vendor) : undefined;
+    const missingImage = req.query.missingImage ? String(req.query.missingImage) : undefined;
+    const refurbSource = req.query.refurbSource ? String(req.query.refurbSource) : undefined;
+    const conditionGrade = req.query.conditionGrade ? String(req.query.conditionGrade) : undefined;
 
     const listFilters = {
       search,
       sizeAgeGroup,
       status,
+      vendor,
+      missingImage,
+      refurbSource,
+      conditionGrade,
       productType:
         productType === 'NEW' || productType === 'REFURBISHED' || productType === 'all'
           ? productType
@@ -109,14 +117,15 @@ export class ProductController {
     const statsProductType =
       productType === 'NEW' || productType === 'REFURBISHED' ? productType : 'NEW';
 
-    const [result, stats] = await Promise.all([
+    const [result, stats, vendors] = await Promise.all([
       productService.getAllProducts(page, limit, categoryId, { admin: true, listFilters }),
       productService.getAdminProductStats(statsProductType),
+      productService.listDistinctVendors(statsProductType),
     ]);
 
     res.status(200).json({
       success: true,
-      data: toPublicJson({ ...result, stats }),
+      data: toPublicJson({ ...result, stats, vendors }),
     });
   }
 

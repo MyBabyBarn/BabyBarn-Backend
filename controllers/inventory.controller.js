@@ -48,6 +48,11 @@ export class InventoryController {
     const search = req.query.search ? String(req.query.search) : undefined;
     const stockStatus = req.query.stockStatus ? String(req.query.stockStatus) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const location = req.query.location ? String(req.query.location) : undefined;
+    const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const priceMin = req.query.priceMin != null ? String(req.query.priceMin) : undefined;
+    const priceMax = req.query.priceMax != null ? String(req.query.priceMax) : undefined;
+    const sort = req.query.sort ? String(req.query.sort) : 'name';
 
     const result = await inventoryService.list({
       page,
@@ -55,6 +60,11 @@ export class InventoryController {
       search,
       stockStatus,
       productType,
+      location,
+      categoryId,
+      priceMin,
+      priceMax,
+      sort,
     });
 
     res.status(200).json({
@@ -101,6 +111,16 @@ export class InventoryController {
     const productId = req.query.productId ? String(req.query.productId) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
     const search = req.query.search ? String(req.query.search).trim() : undefined;
+    const range = req.query.range != null ? String(req.query.range) : 'all';
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+    const eventType = req.query.eventType ? String(req.query.eventType) : undefined;
+    const group = req.query.group ? String(req.query.group) : 'all';
+    const source = req.query.source ? String(req.query.source) : undefined;
+    const location = req.query.location ? String(req.query.location) : undefined;
+    const actor = req.query.actor ? String(req.query.actor) : undefined;
+    const includeFacets =
+      req.query.facets === '1' || req.query.facets === 'true' || req.query.includeFacets === '1';
     const result = await inventoryService.listHistory({
       page,
       limit,
@@ -108,6 +128,15 @@ export class InventoryController {
       productType:
         productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
       search: search || undefined,
+      range,
+      from,
+      to,
+      eventType,
+      group,
+      source,
+      location,
+      actor,
+      includeFacets,
     });
     res.status(200).json({
       success: true,
@@ -120,6 +149,14 @@ export class InventoryController {
     const productId = req.query.productId ? String(req.query.productId) : undefined;
     const productType = req.query.productType ? String(req.query.productType) : undefined;
     const search = req.query.search ? String(req.query.search).trim() : undefined;
+    const range = req.query.range != null ? String(req.query.range) : 'all';
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+    const eventType = req.query.eventType ? String(req.query.eventType) : undefined;
+    const group = req.query.group ? String(req.query.group) : 'all';
+    const source = req.query.source ? String(req.query.source) : undefined;
+    const location = req.query.location ? String(req.query.location) : undefined;
+    const actor = req.query.actor ? String(req.query.actor) : undefined;
     const result = await inventoryService.listHistory({
       page: 1,
       limit: 2000,
@@ -127,28 +164,60 @@ export class InventoryController {
       productType:
         productType === 'NEW' || productType === 'REFURBISHED' ? productType : undefined,
       search: search || undefined,
+      range,
+      from,
+      to,
+      eventType,
+      group,
+      source,
+      location,
+      actor,
+      includeFacets: false,
     });
     const entries = result.entries || result.rows || [];
     const header = [
-      'When',
-      'Event',
+      '#',
+      'Date',
+      'Time',
       'Product',
       'SKU',
-      'Delta',
-      'Reference type',
+      'Variant',
+      'Activity',
+      'Qty',
+      'Stock after',
+      'Location',
       'Reference',
+      'Source',
+      'By',
       'Note',
     ];
-    const rows = entries.map((e) => [
-      e.createdAt,
-      e.eventType,
-      e.product?.name || '',
-      e.variant?.sku || e.productVariant?.sku || e.product?.sku || '',
-      e.quantityChange ?? e.quantityDelta,
-      e.referenceType,
-      e.referenceId,
-      e.reason || e.note || '',
-    ]);
+    const rows = entries.map((e, i) => {
+      const when = e.createdAt ? new Date(e.createdAt) : null;
+      const by =
+        e.user?.firstName || e.user?.lastName
+          ? [e.user.firstName, e.user.lastName].filter(Boolean).join(' ')
+          : e.user?.email || '';
+      const ref =
+        e.referenceOrderNumber ||
+        e.referenceReturnNumber ||
+        (e.referenceType && e.referenceId ? `${e.referenceType}:${e.referenceId}` : e.referenceId || '');
+      return [
+        i + 1,
+        when ? when.toISOString().slice(0, 10) : '',
+        when ? when.toISOString().slice(11, 19) : '',
+        e.product?.name || '',
+        e.variant?.sku || e.product?.sku || '',
+        e.variant?.combinationLabel || '',
+        e.eventType,
+        e.quantityChange ?? e.quantityDelta,
+        e.stockAfter ?? '',
+        e.location || '',
+        ref,
+        e.source || '',
+        by,
+        e.reason || e.note || '',
+      ];
+    });
     const csv = rowsToCsv(header, rows);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
