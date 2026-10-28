@@ -8,7 +8,7 @@
     "dev": "node --watch index.js",
     "build": "prisma generate",
     "start": "node index.js",
-    "test": "node --test ./tests",
+    "test": "node scripts/run-tests.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "node scripts/seed.js",
