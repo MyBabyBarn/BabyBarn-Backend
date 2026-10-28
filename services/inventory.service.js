@@ -281,17 +281,20 @@ export class InventoryService {
     let critical = 0;
     let outOfStock = 0;
     let inactive = 0;
+    const locations = new Set();
     for (const p of products) {
       const lines = flattenProductToSkuLines(p);
       for (const line of lines) {
         totalSkus += 1;
         totalUnits += Number(line.totalStock) || 0;
         if (line.isActiveListing === false) inactive += 1;
+        if (line.warehouseLocation) locations.add(String(line.warehouseLocation));
         const t = line.availableStock ?? line.totalStock;
         if (t <= 0 || line.stockStatus === 'out_of_stock') outOfStock += 1;
         else if (line.stockStatus === 'low_stock') critical += 1;
       }
     }
+
     return {
       totalSkus,
       totalUnits,
@@ -299,6 +302,7 @@ export class InventoryService {
       outOfStock,
       inactive,
       lowStockThreshold: LOW_STOCK_THRESHOLD,
+      locations: [...locations].sort((a, b) => a.localeCompare(b)),
     };
   }
 
@@ -308,6 +312,11 @@ export class InventoryService {
     search,
     stockStatus: stockStatusFilter,
     productType: productTypeFilter,
+    location,
+    categoryId,
+    priceMin,
+    priceMax,
+    sort = 'name',
   }) {
     const skip = (page - 1) * limit;
 
@@ -340,6 +349,10 @@ export class InventoryService {
       });
     }
 
+    if (categoryId && String(categoryId).trim() && String(categoryId) !== 'all') {
+      where.category = { publicId: String(categoryId).trim() };
+    }
+
     const rows = await prisma.product.findMany({
       where,
       include: {
@@ -352,20 +365,35 @@ export class InventoryService {
     });
 
     const flat = rows.flatMap((p) => flattenProductToSkuLines(p));
+    const locQ = location && String(location).trim() && String(location) !== 'all' ? String(location).trim() : '';
+    const minP = priceMin !== undefined && priceMin !== '' && !Number.isNaN(Number(priceMin)) ? Number(priceMin) : null;
+    const maxP = priceMax !== undefined && priceMax !== '' && !Number.isNaN(Number(priceMax)) ? Number(priceMax) : null;
 
     const filtered = flat.filter((line) => {
+      if (locQ && String(line.warehouseLocation || '') !== locQ) return false;
+      if (minP != null && (line.price == null || Number(line.price) < minP)) return false;
+      if (maxP != null && (line.price == null || Number(line.price) > maxP)) return false;
       if (!stockStatusFilter || stockStatusFilter === 'all') return true;
       if (stockStatusFilter === 'inactive') return line.isActiveListing === false;
-      if (stockStatusFilter === 'low_stock') {
+      if (stockStatusFilter === 'low_stock' || stockStatusFilter === 'lowall') {
         return line.isActiveListing !== false && line.stockStatus === 'low_stock';
       }
-      if (stockStatusFilter === 'out_of_stock') {
+      if (stockStatusFilter === 'out_of_stock' || stockStatusFilter === 'out') {
         return line.isActiveListing !== false && line.stockStatus === 'out_of_stock';
       }
-      if (stockStatusFilter === 'in_stock') {
+      if (stockStatusFilter === 'in_stock' || stockStatusFilter === 'ok') {
         return line.isActiveListing !== false && line.stockStatus === 'in_stock';
       }
       return line.stockStatus === stockStatusFilter;
+    });
+
+    const sortKey = String(sort || 'name');
+    filtered.sort((a, b) => {
+      if (sortKey === 'sku') return String(a.sku).localeCompare(String(b.sku));
+      if (sortKey === 'low') return (a.totalStock || 0) - (b.totalStock || 0);
+      if (sortKey === 'high') return (b.totalStock || 0) - (a.totalStock || 0);
+      if (sortKey === 'price') return (Number(b.price) || 0) - (Number(a.price) || 0);
+      return String(a.name).localeCompare(String(b.name));
     });
 
     const total = filtered.length;
@@ -492,6 +520,15 @@ export class InventoryService {
     productPublicId = null,
     productType = null,
     search = null,
+    range = 'all',
+    from = null,
+    to = null,
+    eventType = null,
+    group = 'all',
+    source = null,
+    location = null,
+    actor = null,
+    includeFacets = false,
   }) {
     const { listLedgerHistory } = await import('./inventory-ledger.service.js');
     const ledger = await listLedgerHistory({
@@ -500,12 +537,24 @@ export class InventoryService {
       productPublicId,
       productType,
       search,
+      range,
+      from,
+      to,
+      eventType,
+      group,
+      source,
+      location,
+      actor,
+      includeFacets,
     });
     return {
       entries: ledger.entries.map((e) => ({
         id: e.id,
         eventType: e.eventType,
         quantityChange: e.quantityDelta,
+        stockAfter: e.stockAfter ?? null,
+        location: e.location ?? null,
+        source: e.source ?? null,
         reason: e.note,
         referenceType: e.referenceType,
         referenceId: e.referenceId,
@@ -519,6 +568,8 @@ export class InventoryService {
         user: e.actor ?? null,
       })),
       pagination: ledger.pagination,
+      groupCounts: ledger.groupCounts,
+      facets: ledger.facets,
     };
   }
 
