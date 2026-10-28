@@ -154,6 +154,16 @@ export class RefurbishmentService {
     let listedProduct = null;
     const actorInternalId = await resolveActorUserId(actor);
     if (nextStatus === 'LISTED') {
+      // FMA-04: membership must still be active when the item is refurbished / listed.
+      const memberUntil = job.returnRequest?.user?.accessMemberUntil;
+      const membershipActive = Boolean(memberUntil && new Date(memberUntil) > new Date());
+      if (!membershipActive) {
+        throw new AppError(
+          403,
+          'Farmhouse Friends membership is required to list a refurbished item. The customer membership is no longer active.',
+          'REFURB_MEMBERSHIP_REQUIRED'
+        );
+      }
       listedProduct = await this.createListedRefurbProduct(job, actorInternalId);
       data.listedAt = now;
       data.listedProductId = listedProduct.id;

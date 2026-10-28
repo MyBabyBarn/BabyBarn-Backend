@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { getBusinessSettings } from './admin.service.js';
@@ -42,16 +43,16 @@ export async function getPublicBusinessSettings() {
 }
 
 async function generateUniqueAccessNumber() {
+  // SEC-19: unguessable member numbers (not a 5-digit Math.random space).
   for (let attempt = 0; attempt < 20; attempt++) {
-    const n = Math.floor(10000 + Math.random() * 90000);
-    const accessNumber = `BB-${n}`;
+    const accessNumber = `BB-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
     const exists = await prisma.user.findFirst({
       where: { accessNumber },
       select: { id: true },
     });
     if (!exists) return accessNumber;
   }
-  throw new AppError(500, 'Could not generate ACCESS number');
+  throw new AppError(500, 'Could not generate Farmhouse Friends member number');
 }
 
 export async function saveMembershipRegistration(userPublicId, payload) {

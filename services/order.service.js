@@ -1,5 +1,7 @@
+import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
+import { usdToCents } from '../lib/order-refund-balance.js';
 import { AGE_AXIS_NAME, isCanonicalAge } from '../lib/age-groups.js';
 import {
   buildAdminStatusGroupWhere,
@@ -1620,7 +1622,13 @@ export class OrderService {
 
     const refundAmountUsd = request.refundAmountUsd;
     const amountCents = request.requestedCents;
-    const idempotencyKey = `order-admin-refund-${orderPublicId}-${amountCents}`.slice(0, 255);
+    // PAY-12: each refund attempt needs a unique Stripe idempotency key so two
+    // equal partial refunds on the same order do not silently no-op.
+    const refundAttemptId = crypto.randomBytes(8).toString('hex');
+    const idempotencyKey = `order-admin-refund-${orderPublicId}-${amountCents}-${refundAttemptId}`.slice(
+      0,
+      255
+    );
 
     let refund;
     try {
@@ -2499,21 +2507,20 @@ export class OrderService {
       );
       const nextTax = Math.max(0, Math.round((taxOnOrder - taxShare) * 100) / 100);
       let nextTotal;
-      if (cancellingAll) {
+      if (!isPaid && cancellingAll) {
         nextTotal = 0;
-      } else if (isPaid) {
-        nextTotal = Math.max(
-          0,
-          Math.round((Number(order.totalAmount) - refundAmountUsd) * 100) / 100
-        );
-      } else {
-        // Unpaid: drop cancelled merchandise/tax/credit from the amount still due.
+      } else if (!isPaid) {
         nextTotal = Math.max(
           0,
           Math.round((Number(order.totalAmount) - cancelMerchandise - taxShare + creditShare) * 100) /
             100
         );
+      } else {
+        nextTotal = Number(order.totalAmount);
       }
+      const refundedAmountCents = isPaid
+        ? Math.max(0, Number(order.refundedAmountCents || 0)) + usdToCents(refundAmountUsd)
+        : Number(order.refundedAmountCents || 0);
 
       return tx.order.update({
         where: { id: order.id },
@@ -2525,9 +2532,10 @@ export class OrderService {
               : 'PARTIALLY_REFUNDED'
             : order.paymentStatus,
           fulfillmentStatus: remainingActive === 0 ? null : order.fulfillmentStatus,
-          storeCreditApplied: nextStoreCredit,
-          taxAmount: nextTax,
+          storeCreditApplied: isPaid ? Number(order.storeCreditApplied || 0) : nextStoreCredit,
+          taxAmount: isPaid ? Number(order.taxAmount || 0) : nextTax,
           totalAmount: nextTotal,
+          refundedAmountCents,
           cancellationReviewStatus: reviewStatus,
           cancellationRequestedAt: now,
           cancellationRequestReason: reasonTrimmed,
@@ -2612,14 +2620,17 @@ export class OrderService {
    * then apply the same pre-shipment cancel rules as authenticated customers.
    */
   async cancelOrderByGuest(payload) {
-    let orderNumber = payload.orderNumber ? String(payload.orderNumber).trim() : '';
-    let email = payload.email ? String(payload.email).trim().toLowerCase() : '';
-
-    if (payload.token) {
-      const verified = verifyOrderTrackingToken(payload.token);
-      orderNumber = verified.orderNumber;
-      email = verified.email;
+    // SEC-08: guest cancel requires the signed tracking token (not order number + email alone).
+    if (!payload.token) {
+      throw new AppError(
+        400,
+        'A tracking link token is required to cancel this order.',
+        'TRACKING_TOKEN_REQUIRED'
+      );
     }
+    const verified = verifyOrderTrackingToken(payload.token);
+    const orderNumber = verified.orderNumber;
+    const email = verified.email;
 
     if (!orderNumber || !email) {
       throw new AppError(400, 'Order number and email are required');

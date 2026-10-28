@@ -20,6 +20,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # OPS-01: block deploy when the suite fails (same gate as CI).
+      - name: Run tests
+        run: npm test
 
   deploy:
     needs: ci

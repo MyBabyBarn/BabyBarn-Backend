@@ -26,6 +26,7 @@ import stockAlertsRoutes from './routes/stock-alerts.js';
 import systemRoutes from './routes/system.js';
 import reviewsRoutes from './routes/reviews.js';
 import { primaryLanIpv4 } from './lib/lan-host.js';
+import { assertPrivateUploadAccess, isPrivateUploadPath } from './lib/private-upload-access.js';
 import { stripeWebhook } from './controllers/payment.controller.js';
 import { startScheduledJobs } from './services/scheduled-jobs.service.js';
 
@@ -41,21 +42,19 @@ app.use(
   })
 );
 
-/** Public product/marketing media only — never expose shipping labels or sensitive uploads. */
+/** Public product/marketing media only. Return photos and shipping labels need a session. */
 app.use('/uploads', (req, res, next) => {
   void res;
-  const rel = String(req.path || '')
-    .replace(/\\/g, '/')
-    .toLowerCase();
-  if (
-    rel === '/shipping-labels' ||
-    rel.startsWith('/shipping-labels/') ||
-    rel.includes('/../') ||
-    rel.includes('%2e%2e')
-  ) {
+  const rel = String(req.path || '').replace(/\\/g, '/');
+  const lower = rel.toLowerCase();
+  if (lower.includes('/../') || lower.includes('%2e%2e')) {
     return next(new AppError(403, 'Forbidden'));
   }
-  next();
+  if (!isPrivateUploadPath(lower)) {
+    next();
+    return;
+  }
+  assertPrivateUploadAccess(req, rel).then(() => next()).catch(next);
 });
 app.use(
   '/uploads',
@@ -127,10 +126,19 @@ const authRecoveryLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  // SCL-02: tighter default until a shared Redis store is available.
+  max: Number(process.env.API_RATE_LIMIT_PER_MIN || 120),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests. Try again later.' },
+});
+
+const trackLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many tracking lookups. Try again later.' },
 });
 
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res, next) =>
@@ -156,6 +164,26 @@ app.use(
 );
 app.use('/api', apiLimiter);
 app.use('/api/v1', apiLimiter);
+app.use(
+  ['/api/orders/track', '/api/v1/orders/track', '/api/returns/guest/track', '/api/v1/returns/guest/track'],
+  trackLookupLimiter
+);
+
+/** SEC-09: redact secrets from logged request paths (tokens, reset links, etc.). */
+function redactLoggedPath(rawPath) {
+  const path = String(rawPath || '');
+  const q = path.indexOf('?');
+  if (q < 0) return path;
+  const base = path.slice(0, q);
+  const params = new URLSearchParams(path.slice(q + 1));
+  for (const key of [...params.keys()]) {
+    if (/token|secret|password|authorization|sig|signature/i.test(key)) {
+      params.set(key, '[redacted]');
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
 
 /** Log every API request + response status to the terminal (dev-friendly). */
 app.use((req, res, next) => {
@@ -174,7 +202,7 @@ app.use((req, res, next) => {
     const ms = Date.now() - started;
     const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'log';
     const tag = res.statusCode >= 500 ? 'ERR' : res.statusCode >= 400 ? 'WARN' : 'OK';
-    console[level](`[${tag}] ${req.method} ${path} → ${res.statusCode} (${ms}ms)`);
+    console[level](`[${tag}] ${req.method} ${redactLoggedPath(path)} → ${res.statusCode} (${ms}ms)`);
   });
   next();
 });

@@ -14,8 +14,19 @@ import {
   listAdminSharingActivity,
   updateSharingSettings,
 } from '../services/membership-sharing.service.js';
+import { TEAM_MODULE_ACTIONS } from '../constants/admin-actions.js';
 
 const router = Router();
+
+router.get(
+  '/team/action-catalog',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  (req, res) => {
+    void req;
+    res.status(200).json({ success: true, data: { modules: TEAM_MODULE_ACTIONS } });
+  }
+);
 const homepage = requireConsoleModule('homepage');
 const blog = requireConsoleModule('blog');
 const blogStaff = [authenticate, authorize('ADMIN', 'ADMIN_TEAM'), blog];
@@ -304,6 +315,12 @@ router.patch('/team/:id/modules', authenticate, authorize('ADMIN'), (req, res, n
 );
 router.patch('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.updateTeamMember(req, res).catch(next)
+);
+router.post('/team/:id/resend-invite', authenticate, authorize('ADMIN'), (req, res, next) =>
+  adminController.resendTeamInvite(req, res).catch(next)
+);
+router.delete('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
+  adminController.deleteTeamMember(req, res).catch(next)
 );
 
 export default router;

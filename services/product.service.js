@@ -4,6 +4,7 @@ import { AppError } from '../utils/error-handler.js';
 import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
+import { buildProductSearchOr } from '../lib/product-search.js';
 
 async function wishlistInterestForProducts(productIds) {
   if (!productIds.length) {
@@ -320,7 +321,7 @@ export class ProductService {
   async getAdminProductStats(productType) {
     const typeWhere =
       productType === 'NEW' || productType === 'REFURBISHED' ? { productType } : {};
-    const [total, activeListings, outOfStock] = await Promise.all([
+    const [total, activeListings, outOfStock, lowStock, drafts, inactive] = await Promise.all([
       prisma.product.count({ where: typeWhere }),
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, isActiveListing: true },
@@ -328,8 +329,17 @@ export class ProductService {
       prisma.product.count({
         where: { ...typeWhere, isDraft: false, stock: 0 },
       }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: false, stock: { gt: 0, lt: 10 } },
+      }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: true },
+      }),
+      prisma.product.count({
+        where: { ...typeWhere, isDraft: false, isActiveListing: false },
+      }),
     ]);
-    return { total, activeListings, outOfStock };
+    return { total, activeListings, outOfStock, lowStock, drafts, inactive };
   }
 
   /**
@@ -430,15 +440,11 @@ export class ProductService {
           });
         }
         if (search && String(search).trim()) {
-          const q = String(search).trim();
-          where.AND = where.AND ?? [];
-          where.AND.push({
-            OR: [
-              { name: { contains: q, mode: 'insensitive' } },
-              { description: { contains: q, mode: 'insensitive' } },
-              { sku: { contains: q, mode: 'insensitive' } },
-            ],
-          });
+          const or = buildProductSearchOr(search);
+          if (or) {
+            where.AND = where.AND ?? [];
+            where.AND.push({ OR: or });
+          }
         }
         const pf = {};
         if (minPrice != null && Number.isFinite(Number(minPrice))) {
@@ -455,6 +461,8 @@ export class ProductService {
       const { search, sizeAgeGroup, status, productType } = listFilters;
       if (productType === 'NEW' || productType === 'REFURBISHED') {
         where.productType = productType;
+      } else if (productType === 'all') {
+        /* Categories and similar admin views list new + refurbished together. */
       } else {
         where.productType = 'NEW';
       }
@@ -474,25 +482,24 @@ export class ProductService {
         where.isActiveListing = false;
       } else if (st === 'draft') {
         where.isDraft = true;
-      } else if (st === 'low_stock') {
+      } else if (st === 'low_stock' || st === 'low') {
         where.isDraft = false;
         where.stock = { gt: 0, lt: 10 };
+      } else if (st === 'out_of_stock' || st === 'out') {
+        where.isDraft = false;
+        where.stock = 0;
       }
       if (search && String(search).trim()) {
-        const q = String(search).trim();
-        where.AND = where.AND ?? [];
-        where.AND.push({
-          OR: [
-            { name: { contains: q, mode: 'insensitive' } },
-            { description: { contains: q, mode: 'insensitive' } },
-            { sku: { contains: q, mode: 'insensitive' } },
-          ],
-        });
+        const or = buildProductSearchOr(search);
+        if (or) {
+          where.AND = where.AND ?? [];
+          where.AND.push({ OR: or });
+        }
       }
     }
 
     let orderBy = { updatedAt: 'desc' };
-    if (!admin && listFilters?.sort) {
+    if (listFilters?.sort) {
       const s = String(listFilters.sort);
       if (s === 'price_asc') orderBy = { price: 'asc' };
       else if (s === 'price_desc') orderBy = { price: 'desc' };
@@ -500,6 +507,8 @@ export class ProductService {
       else if (s === 'name_desc') orderBy = { name: 'desc' };
       else if (s === 'newest') orderBy = { updatedAt: 'desc' };
       else if (s === 'refurbished_newest') orderBy = { refurbishedAt: 'desc' };
+      else if (s === 'stock_asc') orderBy = { stock: 'asc' };
+      else if (s === 'rating_desc') orderBy = { averageRating: 'desc' };
     }
 
     const include = {
@@ -1179,12 +1188,9 @@ export class ProductService {
       isActiveListing: true,
       isDraft: false,
     };
-    const q = search ? String(search).trim() : '';
-    if (q) {
-      where.OR = [
-        { name: { contains: q, mode: 'insensitive' } },
-        { sku: { contains: q, mode: 'insensitive' } },
-      ];
+    const or = buildProductSearchOr(search, { includeDescription: false });
+    if (or) {
+      where.OR = or;
     }
 
     const [products, total] = await Promise.all([

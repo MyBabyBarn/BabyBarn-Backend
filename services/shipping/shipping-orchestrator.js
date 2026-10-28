@@ -80,10 +80,20 @@ function demoRatesCheckoutPayload(payload, reason) {
   };
 }
 
-function useDemoCheckoutRates(surface, payload) {
+function useDemoCheckoutRates(surface) {
   if (surface !== 'checkout') return false;
-  if (String(process.env.SHIPPING_DEMO_RATES || '').toLowerCase() === 'true') return true;
-  return false;
+  // SHP-03: demo rates only when explicitly enabled — never as a silent UPS fallback.
+  return String(process.env.SHIPPING_DEMO_RATES || '').toLowerCase() === 'true';
+}
+
+function checkoutRatesUnavailable(reason, message) {
+  throw new AppError(
+    503,
+    message ||
+      'Shipping rates are unavailable right now. Check the address or try again later.',
+    'SHIPPING_RATES_UNAVAILABLE',
+    { reason: reason || 'ups_unavailable' }
+  );
 }
 
 export async function orchestratorGetRates(payload = {}) {
@@ -100,6 +110,12 @@ export async function orchestratorGetRates(payload = {}) {
   const row = providers.find((p) => p.slug === effectiveSlug && p.enabled) || providers.find((p) => p.enabled);
 
   if (!row || row.slug !== 'ups') {
+    if (surface === 'checkout') {
+      if (useDemoCheckoutRates(surface)) {
+        return demoRatesCheckoutPayload(payload, 'ups_provider_missing');
+      }
+      checkoutRatesUnavailable('ups_provider_missing', 'UPS shipping is not available. Please try again later.');
+    }
     const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
     if (payload.preferProviderOnly) {
       throw new AppError(503, 'UPS is the only configured carrier; enable UPS in admin shipping.', 'UPS_REQUIRED');
@@ -111,7 +127,7 @@ export async function orchestratorGetRates(payload = {}) {
   const codes = methods.map((m) => String(m.code));
 
   try {
-    if (useDemoCheckoutRates(surface, payload)) {
+    if (useDemoCheckoutRates(surface)) {
       return demoRatesCheckoutPayload(payload, 'forced_demo_env');
     }
     const envOff = String(process.env.SHIPPING_UPS_ENABLED || '').toLowerCase() === 'false';
@@ -120,18 +136,15 @@ export async function orchestratorGetRates(payload = {}) {
         throw new AppError(503, 'UPS is disabled by configuration', 'UPS_DISABLED');
       }
       if (surface === 'checkout') {
-        return demoRatesCheckoutPayload(payload, 'ups_disabled_env');
+        checkoutRatesUnavailable('ups_disabled_env', 'Shipping is temporarily unavailable.');
       }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
     }
     const res = await upsProv.upsGetRates(row, payload, codes);
     if (res.error === 'incomplete_address') {
-      if (payload.preferProviderOnly) {
+      if (payload.preferProviderOnly || surface === 'checkout') {
         throw new AppError(400, 'Incomplete shipping address', 'SHIPPING_ADDRESS_INVALID');
-      }
-      if (surface === 'checkout') {
-        return demoRatesCheckoutPayload(payload, 'incomplete_address');
       }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
@@ -141,7 +154,7 @@ export async function orchestratorGetRates(payload = {}) {
         throw new AppError(503, 'UPS is not configured', 'UPS_NOT_CONFIGURED');
       }
       if (surface === 'checkout') {
-        return demoRatesCheckoutPayload(payload, 'ups_not_configured');
+        checkoutRatesUnavailable('ups_not_configured', 'Shipping is not configured. Please try again later.');
       }
       const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
       return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };
@@ -154,7 +167,7 @@ export async function orchestratorGetRates(payload = {}) {
       details: res.diagnostics || {},
     });
     if (upsRates.length === 0 && surface === 'checkout') {
-      return demoRatesCheckoutPayload(payload, 'ups_empty_rates');
+      checkoutRatesUnavailable('ups_empty_rates', 'No shipping rates are available for this address.');
     }
     if (payload.preferProviderOnly && upsRates.length === 0) {
       throw new AppError(422, 'No UPS rates for this route', 'SHIPPING_NO_RATES');
@@ -168,11 +181,12 @@ export async function orchestratorGetRates(payload = {}) {
       message: e?.message || String(e),
       details: { code: e?.code },
     });
+    if (e instanceof AppError) throw e;
     if (payload.preferProviderOnly) {
-      throw e instanceof AppError ? e : new AppError(e.statusCode || 502, e.message, e.code, e.details);
+      throw new AppError(e.statusCode || 502, e.message, e.code, e.details);
     }
     if (surface === 'checkout') {
-      return demoRatesCheckoutPayload(payload, 'ups_rate_error');
+      checkoutRatesUnavailable('ups_rate_error', 'Shipping rates could not be loaded. Please try again.');
     }
     const fb = fallbackQuote(payload.shippingAddress || payload.toAddress || {});
     return { provider: fb.provider, shipmentId: null, rates: [fallbackRateFromQuote(fb)] };

@@ -715,6 +715,7 @@ export class ReturnsService {
           where,
           include: returnListInclude,
           orderBy,
+          take: limit,
         });
         return groupReturnRows(rows);
       }
@@ -769,6 +770,7 @@ export class ReturnsService {
         where,
         include: returnListInclude,
         orderBy,
+        take: limit,
       });
     }
 
@@ -1869,6 +1871,22 @@ export class ReturnsService {
         const already = Number(locked.creditAwarded || 0);
         if (already > 0) {
           return { amount: already, created: false, skipped: true };
+        }
+
+        // FMA-04: membership must still be active when credit is awarded (not only at request).
+        const member = await tx.user.findUnique({
+          where: { id: locked.userId },
+          select: { accessMemberUntil: true },
+        });
+        const membershipActive = Boolean(
+          member?.accessMemberUntil && new Date(member.accessMemberUntil) > new Date()
+        );
+        if (!membershipActive) {
+          throw new AppError(
+            403,
+            'Farmhouse Friends membership is required when awarding refurbishment store credit. Membership is no longer active.',
+            'REFURB_MEMBERSHIP_REQUIRED'
+          );
         }
 
         let itemMemberPrice = 0;

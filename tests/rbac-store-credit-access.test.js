@@ -19,14 +19,21 @@ function runMiddleware(mw, user) {
   });
 }
 
-test('RBAC-001: finance-management maps to finance, store-credit, activity — not returns', () => {
+test('RBAC-001 / FMA-01: finance-management maps to finance + store-credit — not activity or returns', () => {
   const mapped = TEAM_PERMISSION_TO_ROUTE_MODULES['finance-management'];
-  assert.deepEqual(mapped, ['finance', 'store-credit', 'activity']);
+  assert.deepEqual(mapped, ['finance', 'store-credit']);
   assert.equal(canAccessRouteModule(['finance-management'], 'store-credit'), true);
   assert.equal(canAccessRouteModule(['finance-management'], 'finance'), true);
-  assert.equal(canAccessRouteModule(['finance-management'], 'activity'), true);
+  assert.equal(canAccessRouteModule(['finance-management'], 'activity'), false);
   assert.equal(canAccessRouteModule(['finance-management'], 'returns'), false);
   assert.equal(canAccessRouteModule(['finance-management'], 'inspection'), false);
+});
+
+test('FMA-01 / REQ-02: activity-log is a separate team permission for activity routes', () => {
+  assert.deepEqual(TEAM_PERMISSION_TO_ROUTE_MODULES['activity-log'], ['activity']);
+  assert.equal(canAccessRouteModule(['activity-log'], 'activity'), true);
+  assert.equal(canAccessRouteModule(['activity-log'], 'finance'), false);
+  assert.equal(canAccessRouteModule(['finance-management', 'activity-log'], 'activity'), true);
 });
 
 test('RBAC-001: returns-refurbishment maps to returns + inspection — not store-credit', () => {

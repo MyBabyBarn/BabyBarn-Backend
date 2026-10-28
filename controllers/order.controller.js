@@ -19,12 +19,18 @@ import {
   orderItemPickSchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
+import { createAdminPlacedOrder } from '../services/admin-create-order.service.js';
 
 function adminActor(req) {
   return { id: req.user?.id, email: req.user?.email };
 }
 
 export class OrderController {
+  async createAdminOrder(req, res) {
+    const data = await createAdminPlacedOrder(req.user.id, req.body || {});
+    res.status(201).json({ success: true, data: toPublicJson(data) });
+  }
+
   async getUserOrders(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
     const limit = Math.min(parseInt(String(req.query.limit), 10) || 10, 100);
@@ -121,7 +127,7 @@ export class OrderController {
 
   async getAllOrders(req, res) {
     const page = parseInt(String(req.query.page), 10) || 1;
-    const limit = parseInt(String(req.query.limit), 10) || 20;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const search = req.query.search ? String(req.query.search) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
     const dateFrom = req.query.dateFrom ? String(req.query.dateFrom) : undefined;

@@ -50,7 +50,7 @@ PDF builders live in `backend/services/pdf/branded-documents.js` (uses backendâ€
 | `refund-confirmation` | Refund initiated |
 | `return-status` | Return workflow update |
 | `store-credit-update` | Wallet credit |
-| `access-purchase` / `access-renewal` / `access-renewal-reminder` / `access-expired` | ACCESS membership |
+| `access-purchase` / `access-renewal` / `access-renewal-reminder` / `access-expired` | Farmhouse Friends membership |
 | `team-invite` | Admin team onboarding |
 | `contact-inquiry-admin` | Storefront contact form |
 

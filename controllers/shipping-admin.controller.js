@@ -110,7 +110,7 @@ export class ShippingAdminController {
   }
 
   async listLogs(req, res) {
-    const limit = parseInt(String(req.query.limit || '50'), 10) || 50;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 100);
     const rows = await shippingAdmin.adminListShippingLogs(limit);
     res.status(200).json({ success: true, data: toPublicJson(rows) });
   }

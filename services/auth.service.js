@@ -15,6 +15,13 @@ import {
   rehomeMisScopedStaffToStaffPortal,
 } from '../lib/portal-scope.js';
 import { linkEligibleGuestOrdersToUser } from './guest-order-link.service.js';
+import { guestConversionPolicy, guestConversionUpdate } from '../lib/guest-account-claim.js';
+import { hashAuthToken } from '../lib/auth-token-hash.js';
+import {
+  assertLoginAllowed,
+  clearLoginFailures,
+  recordLoginFailure,
+} from '../lib/login-lockout.js';
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -180,15 +187,17 @@ export class AuthService {
 
   async createEmailVerificationToken(userId) {
     await prisma.$executeRaw`DELETE FROM "EmailVerificationToken" WHERE "userId" = ${userId}`;
-    const token = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
+    const raw = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
+    const tokenHash = hashAuthToken(raw);
     const expiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
 
+    // SEC-07: persist only the hash; email the raw token.
     await prisma.$executeRaw`
       INSERT INTO "EmailVerificationToken" ("publicId", "token", "userId", "expiresAt", "createdAt")
-      VALUES (${crypto.randomUUID()}, ${token}, ${userId}, ${expiresAt}, NOW())
+      VALUES (${crypto.randomUUID()}, ${tokenHash}, ${userId}, ${expiresAt}, NOW())
     `;
 
-    return token;
+    return raw;
   }
 
   isCustomerRole(roleName) {
@@ -218,31 +227,48 @@ export class AuthService {
 
     if (existingUser) {
       if (existingUser.isGuest) {
+        const policy = guestConversionPolicy();
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.user.update({
           where: { id: existingUser.id },
           data: {
-            password: hashedPassword,
-            firstName: firstName?.trim() || existingUser.firstName,
-            lastName: lastName?.trim() || existingUser.lastName,
-            isGuest: false,
-            convertedAt: new Date(),
-            emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
+            ...guestConversionUpdate({
+              hashedPassword,
+              firstName,
+              lastName,
+              existingFirstName: existingUser.firstName,
+              existingLastName: existingUser.lastName,
+            }),
             portalScope: PORTAL_SCOPE.CUSTOMER,
-            accessOnboardingPending: true,
           },
           include: { role: true },
         });
 
-        await linkEligibleGuestOrdersToUser(user.id, user.email);
+        await invalidateAllSessions(user.id);
 
-        const tokens = await issueSessionTokens(user);
+        if (policy.linkOrdersBeforeVerification) {
+          await linkEligibleGuestOrdersToUser(user.id, user.email);
+        }
+
+        const verifyToken = await this.createEmailVerificationToken(user.id);
+        const actionUrl = `${config.frontend.customerUrl}/verify-email?token=${verifyToken}`;
+        await this.sendAuthEmail({
+          to: user.email,
+          template: 'verify-email',
+          context: {
+            name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
+            actionUrl,
+          },
+        });
+
+        const tokens = policy.issueSessionTokens ? await issueSessionTokens(user) : {};
 
         return {
           user: toPublicUser(user),
           ...tokens,
           convertedFromGuest: true,
-          message: 'Account created. Your recent guest orders are now in your dashboard.',
+          requiresEmailVerification: policy.requiresEmailVerification,
+          message: 'Account created. Verify your email before guest orders are added to your account.',
         };
       }
       throw new AppError(
@@ -305,8 +331,10 @@ export class AuthService {
     };
   }
 
-  async login(email, password, portal = 'customer') {
+  async login(email, password, portal = 'customer', meta = {}) {
     const normalizedEmail = normalizeAuthEmail(email);
+    const clientIp = meta.ip || 'unknown';
+    assertLoginAllowed(normalizedEmail, clientIp);
     const portalScope = portalToScope(portal);
     const user = await findUserByEmailAndPortal(prisma, normalizedEmail, portalScope, {
       include: { role: true },
@@ -333,14 +361,24 @@ export class AuthService {
           'WRONG_PORTAL_CUSTOMER'
         );
       }
+      recordLoginFailure(normalizedEmail, clientIp);
       throw new AppError(401, 'Invalid credentials');
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
+      const { locked } = recordLoginFailure(normalizedEmail, clientIp);
+      if (locked) {
+        throw new AppError(
+          429,
+          'Too many failed sign-in attempts. Try again in about 15 minutes.',
+          'LOGIN_LOCKED'
+        );
+      }
       throw new AppError(401, 'Invalid credentials');
     }
+    clearLoginFailures(normalizedEmail, clientIp);
 
     if (user.isActive === false) {
       throw new AppError(403, 'This account has been deactivated.');
@@ -834,7 +872,7 @@ export class AuthService {
 
     await prisma.passwordResetToken.create({
       data: {
-        token: raw,
+        token: hashAuthToken(raw),
         userId: user.id,
         expiresAt,
       },
@@ -861,8 +899,9 @@ export class AuthService {
   }
 
   async resetPassword(token, password) {
+    const tokenHash = hashAuthToken(token);
     const record = await prisma.passwordResetToken.findUnique({
-      where: { token },
+      where: { token: tokenHash },
     });
 
     if (!record || record.usedAt || record.expiresAt < new Date()) {
@@ -871,16 +910,23 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: record.userId },
-        data: { password: hashedPassword },
-      }),
-      prisma.passwordResetToken.update({
-        where: { id: record.id },
-        data: { usedAt: new Date() },
-      }),
-    ]);
+    // SEC-07: consume atomically so double-submit cannot reuse the same token.
+    const consumed = await prisma.passwordResetToken.updateMany({
+      where: {
+        id: record.id,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: { usedAt: new Date() },
+    });
+    if (consumed.count !== 1) {
+      throw new AppError(400, 'Invalid or expired reset token', 'INVALID_RESET_TOKEN');
+    }
+
+    await prisma.user.update({
+      where: { id: record.userId },
+      data: { password: hashedPassword, mustChangePassword: false },
+    });
 
     await invalidateAllSessions(record.userId);
 
@@ -888,10 +934,11 @@ export class AuthService {
   }
 
   async verifyEmail(token) {
+    const tokenHash = hashAuthToken(token);
     const rows = await prisma.$queryRaw`
       SELECT id, "userId", "expiresAt", "usedAt"
       FROM "EmailVerificationToken"
-      WHERE token = ${token}
+      WHERE token = ${tokenHash}
       LIMIT 1
     `;
 
@@ -917,10 +964,24 @@ export class AuthService {
       throw new AppError(400, 'Invalid or expired verification token', 'INVALID_VERIFICATION_TOKEN');
     }
 
-    await prisma.$transaction([
-      prisma.$executeRaw`UPDATE "User" SET "emailVerifiedAt" = NOW() WHERE id = ${record.userId}`,
-      prisma.$executeRaw`UPDATE "EmailVerificationToken" SET "usedAt" = NOW() WHERE id = ${record.id}`,
-    ]);
+    // SEC-07: mark used only when still unused and unexpired.
+    const consumed = await prisma.$executeRaw`
+      UPDATE "EmailVerificationToken"
+      SET "usedAt" = NOW()
+      WHERE id = ${record.id} AND "usedAt" IS NULL AND "expiresAt" > NOW()
+    `;
+    if (Number(consumed) !== 1) {
+      const existing = await prisma.user.findUnique({
+        where: { id: record.userId },
+        select: { emailVerifiedAt: true },
+      });
+      if (existing?.emailVerifiedAt) {
+        return { message: 'Email verified successfully', alreadyVerified: true };
+      }
+      throw new AppError(400, 'Invalid or expired verification token', 'INVALID_VERIFICATION_TOKEN');
+    }
+
+    await prisma.$executeRaw`UPDATE "User" SET "emailVerifiedAt" = NOW() WHERE id = ${record.userId}`;
 
     const user = await prisma.user.findUnique({ where: { id: record.userId } });
     if (user) {

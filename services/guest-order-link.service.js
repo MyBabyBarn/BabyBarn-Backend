@@ -63,6 +63,18 @@ export async function linkEligibleGuestOrdersToUser(userId, email) {
  */
 export async function assertGuestTrackVisible(order) {
   if (!order) return false;
+
+  // REQ-08: soft-deleted guests stay visible to admin but not guest track.
+  if (order.userId) {
+    const owner = await prisma.user.findUnique({
+      where: { id: order.userId },
+      select: { isGuest: true, guestPurgedAt: true, convertedAt: true },
+    });
+    if (owner?.isGuest && !owner.convertedAt && owner.guestPurgedAt) {
+      return false;
+    }
+  }
+
   const cutoff = guestTrackCutoffDate();
   if (order.createdAt >= cutoff) return true;
 

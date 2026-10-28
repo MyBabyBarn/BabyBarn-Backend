@@ -1,3 +1,4 @@
+import Stripe from 'stripe';
 import { refreshPrismaClientIfNeeded } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { config } from '../config/env.js';
@@ -144,12 +145,14 @@ export class CheckoutIntentService {
   }
 
   async releaseIntentResources(intentPublicId) {
+    let stripePaymentIntentId = null;
     await db().$transaction(async (tx) => {
       const intent = await tx.checkoutIntent.findUnique({
         where: { publicId: intentPublicId },
         include: { lines: true },
       });
       if (!intent || intent.status === 'CONSUMED') return;
+      stripePaymentIntentId = intent.stripePaymentIntentId || null;
 
       for (const line of intent.lines) {
         const product = await tx.product.findUnique({
@@ -173,6 +176,23 @@ export class CheckoutIntentService {
         );
       }
     });
+
+    // PAY-07: cancel the superseded Stripe PaymentIntent so a stale amount cannot be paid.
+    if (stripePaymentIntentId && String(stripePaymentIntentId).startsWith('pi_') && config.stripe?.secretKey) {
+      try {
+        const stripe = new Stripe(config.stripe.secretKey);
+        const pi = await stripe.paymentIntents.retrieve(stripePaymentIntentId);
+        if (
+          pi?.status === 'requires_payment_method' ||
+          pi?.status === 'requires_confirmation' ||
+          pi?.status === 'requires_action'
+        ) {
+          await stripe.paymentIntents.cancel(stripePaymentIntentId);
+        }
+      } catch (err) {
+        console.error('[checkout-intent] cancel PaymentIntent failed', stripePaymentIntentId, err?.message || err);
+      }
+    }
   }
 
   async resolveCheckoutIntent(userPublicId, items, opts = {}) {
@@ -521,7 +541,7 @@ export class CheckoutIntentService {
       }
     }
 
-    const order = await db().$transaction(async (tx) => {
+    let order = await db().$transaction(async (tx) => {
       const intent = await tx.checkoutIntent.findUnique({
         where: { publicId: checkoutIntentPublicId },
         include: { lines: true },

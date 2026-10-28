@@ -111,7 +111,7 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       ${emailCtaButton(context.actionUrl, context.trackingUrl ? 'View order details' : 'View your order')}
       ${context.trackingUrl && context.trackingUrl !== context.actionUrl ? emailCtaButton(context.trackingUrl, 'Track your order', 'secondary') : ''}
       ${context.returnUrl ? emailMutedNote(`Need to start a return? Use this secure link: ${context.returnUrl}`) : ''}
-      ${context.includeReturnEnvelope ? emailMutedNote('As an ACCESS member, your package includes a reusable return envelope for eligible used product returns.') : ''}
+      ${context.includeReturnEnvelope ? emailMutedNote('As a Farmhouse Friends member, your package includes a reusable return envelope for eligible used product returns.') : ''}
       ${emailLinkFallback(context.actionUrl)}
     `;
     const { html } = doc(subject, `Invoice ${context.orderId || ''} — order confirmed`, bodyHtml, brand);
@@ -346,19 +346,19 @@ export function renderBrandedEmailTemplate(template, context = {}, brand) {
       ${emailPanel(
         `<table width="100%">${emailInfoRows([
           { label: 'Email', value: context.email },
-          { label: 'Temporary password', value: context.temporaryPassword, bold: true },
         ])}</table>`,
-        { title: 'Sign-in credentials' }
+        { title: 'Account' }
       )}
-      ${context.loginUrl ? emailCtaButton(context.loginUrl, 'Open admin console', 'secondary') : ''}
-      ${context.loginUrl ? emailLinkFallback(context.loginUrl) : ''}
-      ${emailMutedNote('Please change your password after your first login.')}
+      ${context.actionUrl || context.loginUrl ? emailCtaButton(context.actionUrl || context.loginUrl, 'Set your password', 'secondary') : ''}
+      ${context.actionUrl || context.loginUrl ? emailLinkFallback(context.actionUrl || context.loginUrl) : ''}
+      ${emailMutedNote(`Questions about this invite? Contact ${escapeHtml(brand?.supportEmail || 'hello@babybarn.co')}.`)}
+      ${emailMutedNote('This link expires in 24 hours. Choose your own password before signing in. We never email a password.')}
     `;
-    const { html } = doc(subject, 'Team account credentials', bodyHtml, brand);
+    const { html } = doc(subject, 'Set your team password', bodyHtml, brand);
     return {
       subject,
       html,
-      text: `Team account created. Email: ${context.email}. Temporary password: ${context.temporaryPassword}`,
+      text: `Team account created for ${context.email}. Set your password: ${context.actionUrl || context.loginUrl || ''}`,
     };
   }
 

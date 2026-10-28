@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [master]
+    branches: [master, fix/audit-wave6, fix/audit-wave7]
   push:
-    branches: [master]
+    branches: [master, fix/audit-wave6, fix/audit-wave7]
 
 jobs:
   build:

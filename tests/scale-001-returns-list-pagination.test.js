@@ -219,8 +219,8 @@ function createReturnListHarness(seedRows = []) {
 test('SCALE-001: normalizeAdminListPagination clamps page/limit', () => {
   assert.deepEqual(normalizeAdminListPagination({ page: 0, limit: 0 }), {
     page: 1,
-    limit: undefined,
-    skip: undefined,
+    limit: 200,
+    skip: 0,
     paginate: false,
   });
   assert.equal(normalizeAdminListPagination({ page: 2, limit: 25 }).skip, 25);

@@ -1,15 +1,17 @@
 import { prisma } from '../lib/prisma.js';
 
-/** Guest PII is purged this many days after the guest's most recent order. */
-export const GUEST_RETENTION_DAYS = Number(process.env.GUEST_RETENTION_DAYS ?? 21);
+/**
+ * REQ-08: keep guest data 45 days, then soft-delete (hidden from customer track;
+ * still visible to admin). Measured from the guest's most recent order.
+ */
+export const GUEST_RETENTION_DAYS = Number(process.env.GUEST_RETENTION_DAYS ?? 45);
 
 /**
- * Purge personally identifiable information for stale guest accounts.
+ * Soft-delete stale guest accounts for customer-facing visibility.
  *
- * A guest qualifies when it is an unconverted guest, has not already been purged,
- * and its most recent order is older than the retention window. We keep firstName,
- * lastName and email (for marketing) and strip the rest of the PII: phone, saved
- * addresses, and the contact/shipping/billing details captured on their orders.
+ * A guest qualifies when it is an unconverted guest, has not already been soft-deleted,
+ * and its most recent order is older than the retention window. We set guestPurgedAt so
+ * guest tracking hides the account, but we keep name/email/phone/addresses for admin.
  */
 export async function purgeExpiredGuestData() {
   const cutoff = new Date(Date.now() - GUEST_RETENTION_DAYS * 24 * 60 * 60 * 1000);
@@ -33,7 +35,6 @@ export async function purgeExpiredGuestData() {
   const expiredUserIds = candidates
     .filter((u) => {
       const latest = u.orders[0]?.createdAt;
-      // No orders at all: fall back to never purging here (handled elsewhere if needed).
       if (!latest) return false;
       return new Date(latest) < cutoff;
     })
@@ -45,25 +46,10 @@ export async function purgeExpiredGuestData() {
 
   let purged = 0;
   for (const userId of expiredUserIds) {
-    await prisma.$transaction([
-      prisma.address.deleteMany({ where: { userId } }),
-      prisma.order.updateMany({
-        where: { userId },
-        data: {
-          contactPhone: null,
-          shippingAddressJson: null,
-          billingAddressJson: null,
-        },
-      }),
-      prisma.user.update({
-        where: { id: userId },
-        data: {
-          phone: null,
-          membershipShippingAddressJson: null,
-          guestPurgedAt: new Date(),
-        },
-      }),
-    ]);
+    await prisma.user.update({
+      where: { id: userId },
+      data: { guestPurgedAt: new Date() },
+    });
     purged += 1;
   }
 

@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller.js';
 import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
-import { requireConsoleModule, requireConsoleModuleAny } from '../middleware/admin-console.js';
+import {
+  requireConsoleModule,
+  requireConsoleModuleAny,
+  requireTeamAction,
+} from '../middleware/admin-console.js';
 
 const router = Router();
 const ordersOrShipping = requireConsoleModuleAny(['orders', 'shipping']);
@@ -14,6 +18,14 @@ router.post('/', authenticate, (req, res, next) => orderController.createOrder(r
 router.post('/cart/validate', (req, res, next) => orderController.validateCart(req, res).catch(next));
 router.post('/quote', authenticate, (req, res, next) => orderController.getCheckoutQuote(req, res).catch(next));
 
+router.post(
+  '/admin/create',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'create'),
+  (req, res, next) => orderController.createAdminOrder(req, res).catch(next)
+);
 router.get(
   '/admin/all',
   authenticate,
