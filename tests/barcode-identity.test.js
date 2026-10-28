@@ -34,7 +34,9 @@ async function seedProduct() {
   });
 }
 
-test('barcode identity survives SKU/name/price change; two variants two codes', async () => {
+test('barcode identity survives SKU/name/price change; two variants two codes', {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
   const product = await seedProduct();
   try {
     const rows = await ensureBarcodesForProduct(product.id);

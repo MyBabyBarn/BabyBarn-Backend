@@ -12,6 +12,7 @@ import { generateToken, verifyToken, generateCheckoutToken } from '../utils/jwt.
 import { PORTAL_SCOPE } from '../lib/portal-scope.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const hasDatabase = Boolean(process.env.DATABASE_URL);
 
 test('SEC-001 P1: access JWT default config is short-lived (15m unless env overrides)', () => {
   assert.equal(parseDurationToMs('15m', 0), 15 * 60 * 1000);
@@ -62,7 +63,7 @@ async function cleanupUser(userId) {
   await prisma.user.delete({ where: { id: userId } }).catch(() => undefined);
 }
 
-test('SEC-001 P1: customer login → refresh rotates → old refresh rejected → logout revokes', async () => {
+test('SEC-001 P1: customer login → refresh rotates → old refresh rejected → logout revokes', { skip: !hasDatabase }, async () => {
   const email = `sec001.customer.${Date.now()}@example.com`;
   let userId;
   try {
@@ -103,7 +104,7 @@ test('SEC-001 P1: customer login → refresh rotates → old refresh rejected �
   }
 });
 
-test('SEC-001 P1: admin login → refresh rotates → STAFF portal preserved → deactivated blocked', async () => {
+test('SEC-001 P1: admin login → refresh rotates → STAFF portal preserved → deactivated blocked', { skip: !hasDatabase }, async () => {
   const email = `sec001.admin.${Date.now()}@example.com`;
   let userId;
   try {
@@ -139,7 +140,7 @@ test('SEC-001 P1: admin login → refresh rotates → STAFF portal preserved →
   }
 });
 
-test('SEC-001 P1: concurrent refresh of same token → only one succeeds', async () => {
+test('SEC-001 P1: concurrent refresh of same token → only one succeeds', { skip: !hasDatabase }, async () => {
   const email = `sec001.race.${Date.now()}@example.com`;
   let userId;
   try {
@@ -165,7 +166,7 @@ test('SEC-001 P1: concurrent refresh of same token → only one succeeds', async
   }
 });
 
-test('SEC-001 P1: SESSION_REVOKED path — password change wipes refresh tokens', async () => {
+test('SEC-001 P1: SESSION_REVOKED path — password change wipes refresh tokens', { skip: !hasDatabase }, async () => {
   const email = `sec001.revoke.${Date.now()}@example.com`;
   let userId;
   try {
@@ -186,7 +187,7 @@ test('SEC-001 P1: SESSION_REVOKED path — password change wipes refresh tokens'
   }
 });
 
-test('SEC-001 P1: cross-portal — customer refresh cannot become staff', async () => {
+test('SEC-001 P1: cross-portal — customer refresh cannot become staff', { skip: !hasDatabase }, async () => {
   const email = `sec001.cross.${Date.now()}@example.com`;
   let userId;
   try {
@@ -207,7 +208,7 @@ test('SEC-001 P1: cross-portal — customer refresh cannot become staff', async 
   }
 });
 
-test('SEC-001 P1: logout without access JWT still revokes refresh', async () => {
+test('SEC-001 P1: logout without access JWT still revokes refresh', { skip: !hasDatabase }, async () => {
   const email = `sec001.logout.${Date.now()}@example.com`;
   let userId;
   try {
