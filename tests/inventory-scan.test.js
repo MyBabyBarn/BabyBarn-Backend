@@ -23,7 +23,9 @@ async function seedSimpleProduct() {
   });
 }
 
-test('scan resolve rejects unknown codes; receive/verify follow stock rules', async () => {
+test('scan resolve rejects unknown codes; receive/verify follow stock rules', {
+  skip: !process.env.DATABASE_URL,
+}, async () => {
   const product = await seedSimpleProduct();
   try {
     await assert.rejects(
