@@ -6,8 +6,10 @@ import {
   appendShippingLog,
 } from './shipping-config.service.js';
 import * as upsProv from './providers/ups-shipping.provider.js';
+import * as shippoProv from './providers/shippo-shipping.provider.js';
 import { encodeFallbackRateId, parseRateId } from './rate-id.js';
 import { buildDemoCheckoutRates } from './demo-checkout-rates.js';
+import { shippoClient } from '../providers/shippo.client.js';
 
 function fallbackQuote(address) {
   if (!address || !String(address.country || '').trim()) {
@@ -104,6 +106,41 @@ export async function orchestratorGetRates(payload = {}) {
     surface === 'checkout'
       ? await getDefaultProviderSlug()
       : String(payload.providerSlug || '').trim() || (await getDefaultProviderSlug());
+
+  // Admin USPS / multi-carrier path — Shippo when requested and configured.
+  if (surface === 'admin' && (slug === 'shippo' || String(payload.carrier || '').toLowerCase() === 'usps')) {
+    if (!shippoClient.hasKey()) {
+      throw new AppError(
+        503,
+        'USPS rates require Shippo. Configure SHIPPO_API_KEY or ship via UPS / manual.',
+        'SHIPPO_NOT_CONFIGURED'
+      );
+    }
+    const res = await shippoProv.shippoGetRates(payload);
+    if (res.error === 'incomplete_to' || res.error === 'incomplete_address') {
+      throw new AppError(400, 'Incomplete shipping address', 'SHIPPING_ADDRESS_INVALID');
+    }
+    if (res.error === 'not_configured') {
+      throw new AppError(503, 'Shippo is not configured', 'SHIPPO_NOT_CONFIGURED');
+    }
+    let rates = res.rates || [];
+    const carrierFilter = String(payload.carrier || '').trim().toLowerCase();
+    if (carrierFilter) {
+      rates = rates.filter((r) => String(r.provider || '').toLowerCase().includes(carrierFilter));
+    }
+    await appendShippingLog({
+      providerSlug: 'shippo',
+      action: 'rate',
+      message: `Shippo rates count=${rates.length}`,
+      details: { carrier: payload.carrier || null },
+    });
+    return {
+      provider: 'shippo',
+      shipmentId: res.shipmentId || null,
+      rates,
+      diagnostics: res.diagnostics || null,
+    };
+  }
 
   const providerRow = providers.find((p) => p.slug === slug && p.enabled);
   const effectiveSlug = providerRow ? slug : (await getDefaultProviderSlug());
@@ -210,9 +247,18 @@ export async function orchestratorGenerateLabel(payload = {}) {
     }
     return upsProv.upsBuyLabel(row, payload);
   }
+  if (parsed.kind === 'legacy_middleware' && parsed.provider === 'shippo') {
+    if (!shippoClient.hasKey()) {
+      throw new AppError(503, 'Shippo is not configured', 'SHIPPO_NOT_CONFIGURED');
+    }
+    return shippoProv.shippoBuyLabel({
+      ...payload,
+      rateId: parsed.objectId,
+    });
+  }
   throw new AppError(
     400,
-    'Only UPS rates are supported. Open shipping options again and choose a UPS service.',
+    'Unsupported rate. Open shipping options again and choose a UPS or USPS (Shippo) service.',
     'NON_UPS_RATE_UNSUPPORTED'
   );
 }

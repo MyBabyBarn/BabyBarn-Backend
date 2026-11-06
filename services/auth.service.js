@@ -22,6 +22,7 @@ import {
   clearLoginFailures,
   recordLoginFailure,
 } from '../lib/login-lockout.js';
+import { writeAdminAudit } from './audit.service.js';
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -401,6 +402,27 @@ export class AuthService {
     }
 
     const tokens = await issueSessionTokens(user);
+
+    if (portalScope === PORTAL_SCOPE.STAFF) {
+      const ua = typeof meta.userAgent === 'string' ? meta.userAgent.slice(0, 180) : null;
+      const ip = meta.ip ? String(meta.ip).slice(0, 64) : null;
+      try {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLoginAt: new Date() },
+        });
+        await writeAdminAudit({
+          actorId: user.publicId,
+          actorEmail: user.email,
+          action: 'STAFF_SIGN_IN',
+          entityType: 'User',
+          entityId: user.publicId,
+          meta: { ip, userAgent: ua },
+        });
+      } catch (e) {
+        console.error('[auth] staff sign-in stamp failed', e);
+      }
+    }
 
     return {
       user: toPublicUser(user),

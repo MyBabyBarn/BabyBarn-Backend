@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { AppError } from '../utils/error-handler.js';
 import { rowsToCsv } from '../lib/csv-safe.js';
+import { writeAdminAudit } from './audit.service.js';
 
 function clampRating(value, label) {
   const n = Number(value);
@@ -34,8 +35,16 @@ async function customerUserId(user) {
   return row;
 }
 
+function actorOf(user) {
+  return {
+    actorId: user?.id ?? user?.publicId ?? null,
+    actorEmail: user?.email ?? null,
+  };
+}
+
 function toPlatformReview(row) {
   const returnRequestId = row.returnRequest?.publicId || undefined;
+  const isHidden = row.status === 'HIDDEN';
   return {
     id: row.publicId,
     returnRequestId,
@@ -51,8 +60,10 @@ function toPlatformReview(row) {
     returnExperienceRating: row.returnExperienceRating,
     storeCreditExperienceRating: row.storeCreditExperienceRating,
     overallPlatformRating: row.overallPlatformRating,
+    rating: row.overallPlatformRating,
     feedback: row.feedback,
     status: row.status,
+    statusLabel: isHidden ? 'Hidden' : 'Published',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     customer: row.user
@@ -179,10 +190,15 @@ export async function updatePlatformReview(user, publicId, body) {
   return toPlatformReview(row);
 }
 
-export async function listAdminPlatformReviews({ search, page = 1, limit = 20 } = {}) {
+export async function listAdminPlatformReviews({ search, quick, page = 1, limit = 20 } = {}) {
   const take = Math.min(100, Math.max(1, Number(limit) || 20));
   const currentPage = Math.max(1, Number(page) || 1);
   const where = {};
+  const qk = String(quick || '').toLowerCase();
+  if (qk === 'low') where.overallPlatformRating = { lte: 3 };
+  else if (qk === 'hid' || qk === 'hidden') where.status = 'HIDDEN';
+  else if (qk === 'pub' || qk === 'published') where.status = 'SUBMITTED';
+
   if (search && String(search).trim()) {
     const q = String(search).trim();
     where.OR = [
@@ -194,7 +210,7 @@ export async function listAdminPlatformReviews({ search, page = 1, limit = 20 } 
     ];
   }
 
-  const [rows, total, agg] = await Promise.all([
+  const [rows, total, agg, lowCount, hidCount, allCount, productCount] = await Promise.all([
     prisma.platformReview.findMany({
       where,
       include: {
@@ -207,7 +223,7 @@ export async function listAdminPlatformReviews({ search, page = 1, limit = 20 } 
     }),
     prisma.platformReview.count({ where }),
     prisma.platformReview.aggregate({
-      where,
+      where: { status: 'SUBMITTED' },
       _avg: {
         overallPlatformRating: true,
         returnExperienceRating: true,
@@ -215,6 +231,10 @@ export async function listAdminPlatformReviews({ search, page = 1, limit = 20 } 
       },
       _count: { _all: true },
     }),
+    prisma.platformReview.count({ where: { overallPlatformRating: { lte: 3 } } }),
+    prisma.platformReview.count({ where: { status: 'HIDDEN' } }),
+    prisma.platformReview.count(),
+    prisma.productReview.count({ where: { deletedAt: null } }),
   ]);
 
   return {
@@ -232,6 +252,14 @@ export async function listAdminPlatformReviews({ search, page = 1, limit = 20 } 
     },
     items: rows.map(toPlatformReview),
     pagination: { page: currentPage, limit: take, total, pages: Math.ceil(total / take) || 1 },
+    quickCounts: {
+      low: lowCount,
+      hid: hidCount,
+    },
+    tabCounts: {
+      prod: productCount,
+      plat: allCount,
+    },
   };
 }
 
@@ -266,6 +294,7 @@ export async function exportAdminPlatformReviewsCsv() {
     'storeCreditExperienceRating',
     'overallPlatformRating',
     'feedback',
+    'status',
     'submittedAt',
   ];
   const data = rows.map((row) => [
@@ -277,7 +306,64 @@ export async function exportAdminPlatformReviewsCsv() {
     row.storeCreditExperienceRating,
     row.overallPlatformRating,
     row.feedback,
+    row.status === 'HIDDEN' ? 'Hidden' : 'Published',
     row.createdAt?.toISOString?.() || row.createdAt,
   ]);
   return rowsToCsv(header, data);
+}
+
+export async function hidePlatformReview(user, publicId) {
+  const existing = await prisma.platformReview.findFirst({
+    where: { publicId: String(publicId) },
+    include: {
+      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+      returnRequest: { select: { publicId: true, returnNumber: true, status: true, type: true } },
+    },
+  });
+  if (!existing) throw new AppError(404, 'Platform review not found');
+  if (existing.status === 'HIDDEN') return toPlatformReview(existing);
+  const row = await prisma.platformReview.update({
+    where: { id: existing.id },
+    data: { status: 'HIDDEN' },
+    include: {
+      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+      returnRequest: { select: { publicId: true, returnNumber: true, status: true, type: true } },
+    },
+  });
+  await writeAdminAudit({
+    ...actorOf(user),
+    action: 'PLATFORM_REVIEW_HIDDEN',
+    entityType: 'PlatformReview',
+    entityId: row.publicId,
+    meta: { rating: row.overallPlatformRating },
+  });
+  return toPlatformReview(row);
+}
+
+export async function restorePlatformReview(user, publicId) {
+  const existing = await prisma.platformReview.findFirst({
+    where: { publicId: String(publicId) },
+    include: {
+      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+      returnRequest: { select: { publicId: true, returnNumber: true, status: true, type: true } },
+    },
+  });
+  if (!existing) throw new AppError(404, 'Platform review not found');
+  if (existing.status !== 'HIDDEN') return toPlatformReview(existing);
+  const row = await prisma.platformReview.update({
+    where: { id: existing.id },
+    data: { status: 'SUBMITTED' },
+    include: {
+      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+      returnRequest: { select: { publicId: true, returnNumber: true, status: true, type: true } },
+    },
+  });
+  await writeAdminAudit({
+    ...actorOf(user),
+    action: 'PLATFORM_REVIEW_RESTORED',
+    entityType: 'PlatformReview',
+    entityId: row.publicId,
+    meta: { rating: row.overallPlatformRating },
+  });
+  return toPlatformReview(row);
 }

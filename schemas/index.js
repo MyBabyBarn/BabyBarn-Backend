@@ -444,13 +444,15 @@ export const adminShippingUpdateSchema = z
     shippingCarrier: z.string().min(1).optional(),
     shippingLabelUrl: z.string().max(2000).optional().nullable(),
     manualShippingNotes: z.string().max(4000).optional().nullable(),
+    shippingAddressJson: checkoutAddressLooseSchema.optional(),
   })
   .refine(
     (d) =>
       Boolean(d.trackingNumber?.trim()) ||
       Boolean(d.shippingCarrier?.trim()) ||
       d.shippingLabelUrl !== undefined ||
-      d.manualShippingNotes !== undefined,
+      d.manualShippingNotes !== undefined ||
+      d.shippingAddressJson !== undefined,
     { message: 'Provide at least one shipping field to update' }
   );
 
@@ -476,6 +478,10 @@ export const adminGenerateLabelSchema = z.object({
   shipmentId: z.string().min(1).optional(),
   selectedRate: selectedRateSnapshotSchema.optional(),
   parcels: z.array(checkoutParcelSchema).optional(),
+  /** Override ship-from (warehouse) address for this label purchase. */
+  fromAddress: checkoutAddressLooseSchema.optional(),
+  /** Explicit rebuy after void — ignored when no existing label. */
+  forceRepurchase: z.boolean().optional(),
 });
 
 export const adminBulkUpsLabelsSchema = z.object({
@@ -486,6 +492,8 @@ export const orderFulfillmentActionSchema = z.object({
   action: z.enum(['accept', 'pickup_ready', 'mark_shipped', 'mark_delivered', 'reject_unpaid']),
   /** Required when mark_shipped without tracking/label (UX-002 override). */
   shipOverrideReason: z.string().trim().min(3).max(500).optional(),
+  /** When mark_shipped: email tracking details to the customer (default true). */
+  notifyCustomer: z.boolean().optional(),
 });
 
 export const orderBulkFulfillmentSchema = z.object({
@@ -497,6 +505,21 @@ export const orderBulkFulfillmentSchema = z.object({
 export const pickupListCreateSchema = z.object({
   title: z.string().max(200).optional(),
   orderPublicIds: z.array(z.string().min(1)).min(1).max(200),
+  /** Staff assignee (prototype Assign to). Defaults to acting user when omitted. */
+  assigneePublicId: z.string().min(1).optional(),
+});
+
+export const pickupListListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  search: z.string().max(200).optional(),
+  /** all | open | in_progress | completed */
+  statusGroup: z.enum(['all', 'open', 'in_progress', 'completed']).optional(),
+});
+
+export const pickupListScanSchema = z.object({
+  sku: z.string().trim().min(1).max(120),
+  quantity: z.coerce.number().int().min(1).max(999).optional(),
 });
 
 export const orderItemPickSchema = z.object({
@@ -875,7 +898,12 @@ export const barcodeLookupQuerySchema = z
   .refine((d) => d.code || d.sku, { message: 'code or sku is required' });
 
 export const barcodeListQuerySchema = z.object({
-  productId: z.string().trim().min(1),
+  productId: z.string().trim().min(1).optional(),
+  q: z.string().trim().max(120).optional().default(''),
+  status: z.enum(['all', 'Generated', 'Printed', 'Sent']).optional().default('all'),
+  type: z.enum(['all', 'new', 'refurbished']).optional().default('all'),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  per: z.coerce.number().int().min(1).max(100).optional().default(12),
 });
 
 export const barcodeEnsureSchema = z.object({
@@ -889,6 +917,10 @@ export const barcodeRegenerateSchema = z.object({
 export const barcodeLocationSchema = z.object({
   query: z.string().trim().min(1).max(80),
   warehouseLocation: z.string().trim().max(120).nullable().optional(),
+});
+
+export const barcodeCodesBodySchema = z.object({
+  codes: z.array(z.string().trim().min(1).max(64)).min(1).max(200),
 });
 
 export const scanResolveSchema = z.object({

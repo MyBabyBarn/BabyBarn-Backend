@@ -24,7 +24,7 @@ const sampleLabel = {
   transactionId: 'txn-demo',
 };
 
-test('ORD-001 P4: pre-ship ACCEPTED → PICKUP_READY + tracking; status not SHIPPED', () => {
+test('ORD-001 P4: pre-ship ACCEPTED → LABEL_GENERATED + tracking; status not SHIPPED', () => {
   const order = {
     status: 'PROCESSING',
     fulfillmentStatus: 'ACCEPTED',
@@ -37,7 +37,7 @@ test('ORD-001 P4: pre-ship ACCEPTED → PICKUP_READY + tracking; status not SHIP
     at: new Date('2026-08-10T12:00:00.000Z'),
   });
   assert.equal(setPickupReady, true);
-  assert.equal(data.fulfillmentStatus, 'PICKUP_READY');
+  assert.equal(data.fulfillmentStatus, 'LABEL_GENERATED');
   assert.equal(data.trackingNumber, sampleLabel.trackingNumber);
   assert.equal(data.shippingCarrier, 'UPS');
   assert.equal(data.shippingLabelUrl, sampleLabel.shippingLabelUrl);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate, authorize } from '../middleware/auth.js';
-import { requireConsoleModule } from '../middleware/admin-console.js';
+import { requireConsoleModule, requireTeamAction } from '../middleware/admin-console.js';
 import { adminController } from '../controllers/admin.controller.js';
 import { shippingAdminController } from '../controllers/shipping-admin.controller.js';
 import { homepageCarouselController } from '../controllers/homepage-carousel.controller.js';
@@ -61,11 +61,33 @@ router.get(
   (req, res, next) => adminController.listStoreCreditActivity(req, res).catch(next)
 );
 router.get(
+  '/store-credit',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('store-credit'),
+  (req, res, next) => adminController.getStoreCreditOverview(req, res).catch(next)
+);
+router.get(
   '/audit-logs/export',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('activity'),
+  requireTeamAction('activity-log', 'export'),
   (req, res, next) => adminController.exportAuditLogs(req, res).catch(next)
+);
+router.get(
+  '/audit-logs/facets',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('activity'),
+  (req, res, next) => adminController.listAuditLogFacets(req, res).catch(next)
+);
+router.get(
+  '/audit-logs/:id',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('activity'),
+  (req, res, next) => adminController.getAuditLog(req, res).catch(next)
 );
 router.get(
   '/audit-logs',
@@ -310,6 +332,12 @@ router.get('/team', authenticate, authorize('ADMIN'), (req, res, next) =>
 router.post('/team', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.createTeamMember(req, res).catch(next)
 );
+router.get('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
+  adminController.getTeamMember(req, res).catch(next)
+);
+router.get('/team/:id/activity', authenticate, authorize('ADMIN'), (req, res, next) =>
+  adminController.listTeamMemberActivity(req, res).catch(next)
+);
 router.patch('/team/:id/modules', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.patchTeamModules(req, res).catch(next)
 );
@@ -318,6 +346,9 @@ router.patch('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
 );
 router.post('/team/:id/resend-invite', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.resendTeamInvite(req, res).catch(next)
+);
+router.post('/team/:id/reset-password', authenticate, authorize('ADMIN'), (req, res, next) =>
+  adminController.resetTeamMemberPassword(req, res).catch(next)
 );
 router.delete('/team/:id', authenticate, authorize('ADMIN'), (req, res, next) =>
   adminController.deleteTeamMember(req, res).catch(next)

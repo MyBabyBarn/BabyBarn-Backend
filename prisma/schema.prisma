@@ -176,6 +176,7 @@ enum ProductReviewStatus {
 
 enum PlatformReviewStatus {
   SUBMITTED
+  HIDDEN
 }
 
 enum ShippingProviderLogLevel {
@@ -210,6 +211,10 @@ model User {
   firstName  String?
   lastName   String?
   phone      String?
+  /// Staff job title (ADMIN_TEAM). Distinct from phone.
+  roleTitle  String?
+  /// Last successful staff/customer portal sign-in.
+  lastLoginAt DateTime?
   roleId     Int
   role       Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
 
@@ -227,6 +232,10 @@ model User {
   sharedAccessOrders     Order[] @relation("SharedAccessOrders")
   membershipShareCodes   MembershipShareCode[] @relation("MembershipShareCodes")
   orderItemsPicked       OrderItem[]           @relation("OrderItemPickedBy")
+  ordersAssigned         Order[]               @relation("OrderAssignee")
+  ordersAssignedBy       Order[]               @relation("OrderAssignedBy")
+  pickupListsAssigned    PickupList[]          @relation("PickupListAssignee")
+  pickupListsAssignedBy  PickupList[]          @relation("PickupListAssignedBy")
   checkoutIntents      CheckoutIntent[]
   wishlistItems        WishlistItem[]
   wishlistCartMoves    WishlistCartMove[]
@@ -272,6 +281,8 @@ model User {
   mustChangePassword Boolean  @default(false)
   // JSON array of admin console module slugs; null = all modules (ADMIN_TEAM).
   adminModules       Json?
+  /// ADMIN_TEAM options e.g. { "orders": "all" | "assigned" }.
+  adminModuleOptions Json?
   /// ADMIN_TEAM only: when true, may open inbox / receive operational alert emails.
   adminNotificationAccess Boolean @default(false)
 
@@ -519,6 +530,9 @@ model ProductBarcode {
   product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   productVariantId Int?
   productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  /// Set when labels are printed (prototype: Generated → Printed).
+  printedAt        DateTime?
+  /// Set when labels are marked sent to warehouse (prototype: Printed → Sent).
   sentToVendorAt   DateTime?
   aliases          ProductBarcodeAlias[]
   createdAt        DateTime @default(now())
@@ -526,6 +540,8 @@ model ProductBarcode {
 
   @@index([productId])
   @@index([productVariantId])
+  @@index([printedAt])
+  @@index([sentToVendorAt])
 }
 
 /// Old BBP codes kept after regenerate-while-sent so vendor labels still resolve.
@@ -685,6 +701,13 @@ model Order {
   cancellationRequestReason String?
   cancellationReviewNote    String?
 
+  /// Staff owner for warehouse/support queue (prototype Assign / Reassign).
+  assignedToUserId Int?
+  assignedTo       User?     @relation("OrderAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  assignedAt       DateTime?
+  assignedByUserId Int?
+  assignedBy       User?     @relation("OrderAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
+
   user       User        @relation(fields: [userId], references: [id], onDelete: Restrict)
   orderItems OrderItem[]
   returnRequests ReturnRequest[]
@@ -705,6 +728,7 @@ model Order {
   @@index([cancellationReviewStatus])
   @@index([sharedAccessOwnerId])
   @@index([sharedAccessCodeId])
+  @@index([assignedToUserId])
 }
 
 model MembershipShareCode {
@@ -743,8 +767,21 @@ model PickupList {
   id        Int      @id @default(autoincrement())
   publicId String   @unique @default(cuid())
   title     String?
+  /// Display code PL-0003 style is derived from id; assignee required at create (prototype).
+  assignedToUserId Int?
+  assignedTo       User?     @relation("PickupListAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  assignedAt       DateTime?
+  assignedByUserId Int?
+  assignedBy       User?     @relation("PickupListAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
+  /// Denormalized pick progress for Open / In progress / Completed tabs.
+  progressPicked   Int       @default(0)
+  progressNeeded   Int       @default(0)
+  completedAt      DateTime?
   createdAt DateTime @default(now())
   lines     PickupListLine[]
+
+  @@index([assignedToUserId])
+  @@index([completedAt])
 }
 
 model PickupListLine {
@@ -1585,6 +1622,8 @@ model ProductReview {
   body                 String?             @db.Text
   imageUrls            Json?
   status               ProductReviewStatus @default(APPROVED)
+  /// Staff-only reason when status is REJECTED (hidden from storefront).
+  hideReason           String?
   reviewerDisplayName  String?
   deletedAt            DateTime?
   createdAt            DateTime            @default(now())

@@ -41,6 +41,8 @@ function dateRangeWhere(dateFrom, dateTo) {
   return Object.keys(range).length ? range : undefined;
 }
 
+const MS_DAY = 24 * 60 * 60 * 1000;
+
 export async function getFinanceStats({ dateFrom, dateTo } = {}) {
   const createdAt = dateRangeWhere(dateFrom, dateTo);
   const basePaid = {
@@ -49,8 +51,23 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
     ...(createdAt ? { createdAt } : {}),
   };
 
-  const [totalAgg, refundedAgg, refurbishedRow, newProductRow, refurbishedOrderCount, newProductOrderCount] =
-    await Promise.all([
+  const creditTxnRange = createdAt
+    ? { createdAt }
+    : undefined;
+
+  const [
+    totalAgg,
+    refundedAgg,
+    refurbishedRow,
+    newProductRow,
+    refurbishedOrderCount,
+    newProductOrderCount,
+    taxShipAgg,
+    storeCreditOwedAgg,
+    creditIssuedAgg,
+    creditUsedAgg,
+    creditAdjAgg,
+  ] = await Promise.all([
       prisma.order.aggregate({
         where: basePaid,
         _sum: { totalAmount: true },
@@ -68,6 +85,25 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
       newProductSalesRaw(createdAt),
       distinctOrderCountByProductType(createdAt, 'REFURBISHED'),
       distinctOrderCountByProductType(createdAt, 'NEW'),
+      prisma.order.aggregate({
+        where: basePaid,
+        _sum: { taxAmount: true, shippingCost: true },
+      }),
+      prisma.storeCreditWallet.aggregate({
+        _sum: { balance: true },
+      }),
+      prisma.storeCreditTransaction.aggregate({
+        where: { type: 'EARNED', ...(creditTxnRange || {}) },
+        _sum: { amount: true },
+      }),
+      prisma.storeCreditTransaction.aggregate({
+        where: { type: 'REDEEMED', ...(creditTxnRange || {}) },
+        _sum: { amount: true },
+      }),
+      prisma.storeCreditTransaction.aggregate({
+        where: { type: 'ADJUSTED', ...(creditTxnRange || {}) },
+        _sum: { amount: true },
+      }),
     ]);
 
   const now = new Date();
@@ -82,6 +118,84 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
 
   const totalRevenue = totalAgg._sum.totalAmount ?? 0;
   const refundedTotal = refundedAgg._sum.totalAmount ?? 0;
+  const taxCollected = Number(taxShipAgg._sum.taxAmount || 0);
+  const shippingCharged = Number(taxShipAgg._sum.shippingCost || 0);
+  const storeCreditOwed = Math.max(0, Number(storeCreditOwedAgg._sum.balance || 0));
+  const storeCreditIssued = Math.max(0, Number(creditIssuedAgg._sum.amount || 0));
+  const storeCreditUsed = Math.abs(Number(creditUsedAgg._sum.amount || 0));
+  const storeCreditAdjusted = Number(creditAdjAgg._sum.amount || 0);
+
+  // Money-in series for overview chart (daily buckets over the selected window, max 90 points).
+  const seriesEnd = createdAt?.lte ? new Date(createdAt.lte) : now;
+  const seriesStart = createdAt?.gte
+    ? new Date(createdAt.gte)
+    : new Date(seriesEnd.getTime() - 30 * MS_DAY);
+  const spanDays = Math.max(
+    1,
+    Math.min(90, Math.ceil((seriesEnd.getTime() - seriesStart.getTime()) / MS_DAY))
+  );
+  const step = spanDays > 45 ? 7 : 1;
+  const seriesBuckets = [];
+  for (let t = seriesStart.getTime(); t <= seriesEnd.getTime(); t += step * MS_DAY) {
+    seriesBuckets.push({
+      start: new Date(t),
+      end: new Date(Math.min(seriesEnd.getTime() + 1, t + step * MS_DAY)),
+    });
+  }
+  const moneyInSeries = await Promise.all(
+    seriesBuckets.map(async (b) => {
+      const [ord, mem] = await Promise.all([
+        prisma.order.aggregate({
+          where: {
+            paymentStatus: 'PAID',
+            status: { notIn: ['CANCELLED'] },
+            createdAt: { gte: b.start, lt: b.end },
+          },
+          _sum: { totalAmount: true },
+        }),
+        prisma.membershipPayment.aggregate({
+          where: { paidAt: { gte: b.start, lt: b.end } },
+          _sum: { amount: true },
+        }),
+      ]);
+      return {
+        label: b.end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        amount: Number(ord._sum.totalAmount || 0) + Number(mem._sum.amount || 0),
+      };
+    })
+  );
+
+  // Tax by calendar month (ignores period filter — prototype tax tab behavior).
+  const taxOrders = await prisma.order.findMany({
+    where: {
+      paymentStatus: { in: ['PAID', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
+      status: { not: 'CANCELLED' },
+    },
+    select: { createdAt: true, taxAmount: true, totalAmount: true, paymentStatus: true },
+    take: 5000,
+    orderBy: { createdAt: 'desc' },
+  });
+  const taxByMonthMap = new Map();
+  for (const o of taxOrders) {
+    const key = o.createdAt.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const row = taxByMonthMap.get(key) || { month: key, ts: o.createdAt.getTime(), taxableSales: 0, taxCollected: 0, taxRefunded: 0 };
+    if (o.paymentStatus === 'PAID') {
+      row.taxableSales += Number(o.totalAmount || 0) - Number(o.taxAmount || 0);
+      row.taxCollected += Number(o.taxAmount || 0);
+    } else {
+      row.taxRefunded += Number(o.taxAmount || 0);
+    }
+    taxByMonthMap.set(key, row);
+  }
+  const taxByMonth = [...taxByMonthMap.values()]
+    .sort((a, b) => b.ts - a.ts)
+    .map(({ ts: _ts, ...rest }) => ({
+      ...rest,
+      taxableSales: +rest.taxableSales.toFixed(2),
+      taxCollected: +rest.taxCollected.toFixed(2),
+      taxRefunded: +rest.taxRefunded.toFixed(2),
+      netTaxOwed: +(rest.taxCollected - rest.taxRefunded).toFixed(2),
+    }));
 
   return {
     totalRevenue,
@@ -98,10 +212,16 @@ export async function getFinanceStats({ dateFrom, dateTo } = {}) {
     membershipNote:
       'Farmhouse Friends revenue is tracked in the membership payment ledger (Stripe Checkout).',
     activeMembersCount: activeMembers,
+    taxCollected: +taxCollected.toFixed(2),
+    shippingCharged: +shippingCharged.toFixed(2),
+    storeCreditOwed: +storeCreditOwed.toFixed(2),
+    storeCreditIssued: +storeCreditIssued.toFixed(2),
+    storeCreditUsed: +storeCreditUsed.toFixed(2),
+    storeCreditAdjusted: +storeCreditAdjusted.toFixed(2),
+    moneyInSeries,
+    taxByMonth,
   };
 }
-
-const MS_DAY = 24 * 60 * 60 * 1000;
 
 function startOfLocalDay(d = new Date()) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -922,14 +1042,83 @@ export async function listFinanceTransactions(
   };
 }
 
-export async function listCustomers(page = 1, limit = 20, { search, role } = {}) {
+const CUSTOMER_LIST_ROLES = ['CUSTOMER', 'USER'];
+const MEMBERSHIP_EXPIRING_DAYS = 30;
+const GUEST_LOOKUP_DAYS = 45;
+
+function membershipStatusFromUntil(accessMemberUntil) {
+  if (!accessMemberUntil) return null;
+  const until = new Date(accessMemberUntil).getTime();
+  if (Number.isNaN(until)) return null;
+  const daysLeft = (until - Date.now()) / (24 * 60 * 60 * 1000);
+  if (daysLeft < 0) return 'Expired';
+  if (daysLeft <= MEMBERSHIP_EXPIRING_DAYS) return 'Expiring soon';
+  return 'Active';
+}
+
+function customerTabClause(tab) {
+  const now = new Date();
+  switch (tab) {
+    case 'friends':
+      return { isGuest: false, accessMemberUntil: { gt: now } };
+    case 'customer':
+      return {
+        isGuest: false,
+        OR: [{ accessMemberUntil: null }, { accessMemberUntil: { lte: now } }],
+      };
+    case 'guest':
+      return { isGuest: true };
+    case 'inactive':
+      return { isActive: false };
+    case 'all':
+    default:
+      // Prototype "All" = registered accounts (guests live on their own tab).
+      return { isGuest: false };
+  }
+}
+
+function membershipFilterClause(mem) {
+  const now = new Date();
+  const soon = new Date(now.getTime() + MEMBERSHIP_EXPIRING_DAYS * 24 * 60 * 60 * 1000);
+  switch (mem) {
+    case 'Active':
+      return { isGuest: false, accessMemberUntil: { gt: soon } };
+    case 'Expiring soon':
+      return { isGuest: false, accessMemberUntil: { gt: now, lte: soon } };
+    case 'Expired':
+      return { isGuest: false, accessMemberUntil: { lte: now } };
+    case 'Cancelled':
+      // No dedicated cancel flag yet — treat as expired / ended membership.
+      return { isGuest: false, accessMemberUntil: { lte: now } };
+    default:
+      return null;
+  }
+}
+
+export async function listCustomers(
+  page = 1,
+  limit = 20,
+  { search, role, tab = 'all', membership, has, sort = 'new' } = {}
+) {
   const skip = (page - 1) * limit;
   const and = [];
+
   if (role && String(role).trim()) {
     and.push({ role: { name: String(role).trim() } });
   } else {
-    and.push({ role: { name: { in: ['CUSTOMER', 'USER'] } } });
+    and.push({ role: { name: { in: CUSTOMER_LIST_ROLES } } });
   }
+
+  const tabClause = customerTabClause(String(tab || 'all'));
+  if (tabClause) and.push(tabClause);
+
+  const memClause = membershipFilterClause(membership);
+  if (memClause) and.push(memClause);
+
+  if (has === 'orders') and.push({ orders: { some: {} } });
+  else if (has === 'none') and.push({ orders: { none: {} } });
+  else if (has === 'credit') and.push({ storeCreditWallet: { balance: { gt: 0 } } });
+
   if (search && String(search).trim()) {
     const q = String(search).trim();
     and.push({
@@ -937,37 +1126,148 @@ export async function listCustomers(page = 1, limit = 20, { search, role } = {})
         { email: { contains: q, mode: 'insensitive' } },
         { firstName: { contains: q, mode: 'insensitive' } },
         { lastName: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q, mode: 'insensitive' } },
+        { accessNumber: { contains: q, mode: 'insensitive' } },
+        { publicId: { contains: q, mode: 'insensitive' } },
       ],
     });
   }
-  const where = { AND: and };
 
-  const [users, total] = await Promise.all([
-    prisma.user.findMany({
-      where,
-      skip,
-      take: limit,
+  const where = { AND: and };
+  const baseRoleWhere = {
+    role: { name: { in: CUSTOMER_LIST_ROLES } },
+  };
+
+  let orderBy = { createdAt: 'desc' };
+  if (sort === 'oldest') orderBy = { createdAt: 'asc' };
+  else if (sort === 'name') orderBy = [{ firstName: 'asc' }, { lastName: 'asc' }];
+  else if (sort === 'orders') orderBy = { orders: { _count: 'desc' } };
+
+  const needsSpendSort = sort === 'spent';
+
+  const select = {
+    id: true,
+    publicId: true,
+    email: true,
+    firstName: true,
+    lastName: true,
+    phone: true,
+    isActive: true,
+    isGuest: true,
+    accessNumber: true,
+    accessMemberUntil: true,
+    createdAt: true,
+    guestCreatedAt: true,
+    role: { select: { name: true } },
+    storeCreditWallet: { select: { balance: true } },
+    _count: { select: { orders: true } },
+    orders: {
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        publicId: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        phone: true,
-        isActive: true,
-        isGuest: true,
-        accessMemberUntil: true,
-        createdAt: true,
-        role: { select: { name: true } },
-      },
-    }),
-    prisma.user.count({ where }),
+      take: 1,
+      select: { createdAt: true, totalAmount: true },
+    },
+  };
+
+  let users;
+  let total;
+
+  if (needsSpendSort) {
+    const matching = await prisma.user.findMany({
+      where,
+      select: { id: true },
+    });
+    total = matching.length;
+    const ids = matching.map((u) => u.id);
+    const spendRows =
+      ids.length === 0
+        ? []
+        : await prisma.order.groupBy({
+            by: ['userId'],
+            where: {
+              userId: { in: ids },
+              status: { not: 'CANCELLED' },
+              paymentStatus: 'PAID',
+            },
+            _sum: { totalAmount: true },
+          });
+    const spendMap = Object.fromEntries(
+      spendRows.map((r) => [r.userId, Number(r._sum.totalAmount || 0)])
+    );
+    ids.sort((a, b) => (spendMap[b] || 0) - (spendMap[a] || 0));
+    const pageIds = ids.slice(skip, skip + limit);
+    users =
+      pageIds.length === 0
+        ? []
+        : await prisma.user.findMany({
+            where: { id: { in: pageIds } },
+            select,
+          });
+    const orderIndex = Object.fromEntries(pageIds.map((id, i) => [id, i]));
+    users.sort((a, b) => (orderIndex[a.id] ?? 0) - (orderIndex[b.id] ?? 0));
+  } else {
+    [users, total] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        select,
+      }),
+      prisma.user.count({ where }),
+    ]);
+  }
+
+  const userIds = users.map((u) => u.id);
+  const spendRows =
+    userIds.length === 0
+      ? []
+      : await prisma.order.groupBy({
+          by: ['userId'],
+          where: {
+            userId: { in: userIds },
+            status: { not: 'CANCELLED' },
+            paymentStatus: 'PAID',
+          },
+          _sum: { totalAmount: true },
+        });
+  const spendByUser = Object.fromEntries(
+    spendRows.map((r) => [r.userId, Number(r._sum.totalAmount || 0)])
+  );
+
+  const [all, friends, customer, guest, inactive] = await Promise.all([
+    prisma.user.count({ where: { AND: [baseRoleWhere, customerTabClause('all')] } }),
+    prisma.user.count({ where: { AND: [baseRoleWhere, customerTabClause('friends')] } }),
+    prisma.user.count({ where: { AND: [baseRoleWhere, customerTabClause('customer')] } }),
+    prisma.user.count({ where: { AND: [baseRoleWhere, customerTabClause('guest')] } }),
+    prisma.user.count({ where: { AND: [baseRoleWhere, customerTabClause('inactive')] } }),
   ]);
 
+  const customers = users.map((u) => {
+    const { _count, orders, storeCreditWallet, ...rest } = u;
+    const lastOrderAt = orders[0]?.createdAt ?? null;
+    const membershipStatus = membershipStatusFromUntil(u.accessMemberUntil);
+    let guestLookupDaysLeft = null;
+    if (u.isGuest) {
+      const anchor = lastOrderAt || u.guestCreatedAt || u.createdAt;
+      const ageDays = (Date.now() - new Date(anchor).getTime()) / (24 * 60 * 60 * 1000);
+      guestLookupDaysLeft = Math.max(0, Math.ceil(GUEST_LOOKUP_DAYS - ageDays));
+    }
+    return {
+      ...rest,
+      orderCount: _count.orders,
+      totalSpend: spendByUser[u.id] ?? 0,
+      lastOrderAt,
+      storeCreditBalance: Number(storeCreditWallet?.balance || 0),
+      membershipStatus,
+      accessMemberActive: membershipStatus === 'Active' || membershipStatus === 'Expiring soon',
+      guestLookupDaysLeft,
+    };
+  });
+
   return {
-    customers: users,
+    customers,
     pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 },
+    tabCounts: { all, friends, customer, guest, inactive },
   };
 }
 
@@ -1147,30 +1447,75 @@ export async function setUserActive(userPublicId, isActive) {
 
 export async function listAccessMembers({ filter = 'all' } = {}) {
   const now = new Date();
-  let where = {};
+  const soon = new Date(now.getTime() + MEMBERSHIP_EXPIRING_DAYS * 24 * 60 * 60 * 1000);
+  let where = { accessMemberUntil: { not: null } };
   if (filter === 'active') {
-    where = { accessMemberUntil: { gt: now } };
+    where = { accessMemberUntil: { gt: soon } };
+  } else if (filter === 'expiring') {
+    where = { accessMemberUntil: { gt: now, lte: soon } };
   } else if (filter === 'expired') {
     where = { accessMemberUntil: { not: null, lte: now } };
-  } else {
-    where = { accessMemberUntil: { not: null } };
   }
 
   const users = await prisma.user.findMany({
     where,
-    orderBy: { accessMemberUntil: 'desc' },
+    orderBy: { accessMemberUntil: 'asc' },
     select: {
       id: true,
       publicId: true,
       email: true,
       firstName: true,
       lastName: true,
+      phone: true,
+      accessNumber: true,
       accessMemberUntil: true,
+      accessRenewalReminderSentAt: true,
       createdAt: true,
+      membershipPayments: {
+        orderBy: { paidAt: 'asc' },
+        take: 1,
+        select: { paidAt: true, amount: true },
+      },
     },
   });
 
-  return { members: users };
+  const members = users.map((u) => {
+    const membershipStatus = membershipStatusFromUntil(u.accessMemberUntil);
+    const startedAt =
+      u.membershipPayments[0]?.paidAt ||
+      (u.accessMemberUntil
+        ? new Date(
+            new Date(u.accessMemberUntil).getTime() - 365 * 24 * 60 * 60 * 1000
+          )
+        : null);
+    const { membershipPayments, ...rest } = u;
+    return {
+      ...rest,
+      startedAt,
+      membershipStatus,
+      accessMemberActive: membershipStatus === 'Active' || membershipStatus === 'Expiring soon',
+      reminderSentAt: u.accessRenewalReminderSentAt,
+      feePaid: membershipPayments[0]?.amount ?? null,
+    };
+  });
+
+  const allWithMembership = await prisma.user.findMany({
+    where: { accessMemberUntil: { not: null } },
+    select: { accessMemberUntil: true },
+  });
+  const statusCounts = { active: 0, expiring: 0, expired: 0, cancelled: 0 };
+  for (const u of allWithMembership) {
+    const s = membershipStatusFromUntil(u.accessMemberUntil);
+    if (s === 'Active') statusCounts.active += 1;
+    else if (s === 'Expiring soon') statusCounts.expiring += 1;
+    else if (s === 'Expired') statusCounts.expired += 1;
+  }
+
+  return {
+    members,
+    statusCounts,
+    total: allWithMembership.length,
+  };
 }
 
 export async function getBusinessSettings() {
@@ -1256,6 +1601,64 @@ async function assertActorIsAdmin(actorPublicId) {
   }
 }
 
+function normalizeAdminModuleOptions(raw) {
+  const orders =
+    raw && typeof raw === 'object' && (raw.orders === 'assigned' || raw.orders === 'all')
+      ? raw.orders
+      : 'all';
+  return { orders };
+}
+
+function deriveTeamStatus(user) {
+  if (!user.isActive) return 'inactive';
+  if (user.role?.name === 'ADMIN_TEAM' && user.mustChangePassword === true) return 'invited';
+  return 'active';
+}
+
+function mapTeamMemberRow(user) {
+  const access = serializeAdminAccess(user.adminModules);
+  const isDefault = user.role?.name === 'ADMIN';
+  const invitePending = user.role?.name === 'ADMIN_TEAM' && user.mustChangePassword === true;
+  const roleTitle = isDefault
+    ? 'Default admin'
+    : user.roleTitle || null;
+  return {
+    publicId: user.publicId,
+    email: user.email,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    phone: user.phone || null,
+    roleTitle,
+    adminModules: access,
+    adminModuleOptions: normalizeAdminModuleOptions(user.adminModuleOptions),
+    adminNotificationAccess: Boolean(user.adminNotificationAccess),
+    isActive: user.isActive,
+    createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt || null,
+    isDefault,
+    invitePending,
+    status: deriveTeamStatus(user),
+    moduleCount: Object.keys(access || {}).filter((k) => (access[k] || []).length > 0).length,
+  };
+}
+
+const TEAM_MEMBER_SELECT = {
+  publicId: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  phone: true,
+  roleTitle: true,
+  adminModules: true,
+  adminModuleOptions: true,
+  adminNotificationAccess: true,
+  isActive: true,
+  mustChangePassword: true,
+  createdAt: true,
+  lastLoginAt: true,
+  role: { select: { name: true } },
+};
+
 export async function listAdminTeamMembers(actorPublicId) {
   void actorPublicId;
   const roles = await prisma.role.findMany({
@@ -1266,36 +1669,56 @@ export async function listAdminTeamMembers(actorPublicId) {
   const users = await prisma.user.findMany({
     where: { roleId: { in: roles.map((role) => role.id) } },
     orderBy: [{ role: { name: 'asc' } }, { email: 'asc' }],
-    select: {
-      publicId: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      adminModules: true,
-      adminNotificationAccess: true,
-      isActive: true,
-      mustChangePassword: true,
-      createdAt: true,
-      role: { select: { name: true } },
-    },
+    select: TEAM_MEMBER_SELECT,
   });
   return {
     supportEmail: config.brand?.supportEmail || null,
-    members: users.map((user) => ({
-      publicId: user.publicId,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      phone: user.phone,
-      adminModules: serializeAdminAccess(user.adminModules),
-      adminNotificationAccess: user.adminNotificationAccess,
-      isActive: user.isActive,
-      createdAt: user.createdAt,
-      roleTitle: user.role?.name === 'ADMIN' ? 'Default admin' : user.phone || null,
-      isDefault: user.role?.name === 'ADMIN',
-      invitePending: user.role?.name === 'ADMIN_TEAM' && user.mustChangePassword === true,
-    })),
+    members: users.map(mapTeamMemberRow),
+  };
+}
+
+export async function getAdminTeamMember(actorPublicId, targetPublicId) {
+  void actorPublicId;
+  const user = await prisma.user.findUnique({
+    where: { publicId: targetPublicId },
+    select: {
+      ...TEAM_MEMBER_SELECT,
+      addresses: {
+        orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
+        take: 1,
+        select: {
+          publicId: true,
+          fullName: true,
+          addressLine1: true,
+          addressLine2: true,
+          street: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          country: true,
+          phoneNumber: true,
+        },
+      },
+    },
+  });
+  if (!user || (user.role?.name !== 'ADMIN' && user.role?.name !== 'ADMIN_TEAM')) {
+    throw new AppError(404, 'Team member not found');
+  }
+  const address = user.addresses?.[0] || null;
+  return {
+    ...mapTeamMemberRow(user),
+    address: address
+      ? {
+          publicId: address.publicId,
+          line1: address.addressLine1 || address.street || '',
+          line2: address.addressLine2 || '',
+          city: address.city || '',
+          state: address.state || '',
+          zip: address.zipCode || '',
+          country: address.country || 'US',
+          phoneNumber: address.phoneNumber || null,
+        }
+      : null,
   };
 }
 
@@ -1357,7 +1780,19 @@ export async function createAdminTeamMember(actorPublicId, payload) {
   }
 
   const inviteMethod = payload.inviteMethod === 'invite' ? 'invite' : 'temp';
-  const hashed = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+  const phone = payload.phone != null ? String(payload.phone).trim() || null : null;
+  const moduleOptions = normalizeAdminModuleOptions(payload.adminModuleOptions);
+  const emailCreds = payload.emailCreds !== false;
+
+  let oneTimePassword = null;
+  let hashed;
+  if (inviteMethod === 'temp') {
+    oneTimePassword = generateTeamOneTimePassword();
+    hashed = await bcrypt.hash(oneTimePassword, 10);
+  } else {
+    hashed = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+  }
+
   let created;
   try {
     created = await prisma.user.create({
@@ -1366,26 +1801,18 @@ export async function createAdminTeamMember(actorPublicId, payload) {
         password: hashed,
         firstName,
         lastName,
-        phone: roleTitle,
+        phone,
+        roleTitle,
         roleId: teamRole.id,
         portalScope: PORTAL_SCOPE.STAFF,
         adminModules: accessMap,
+        adminModuleOptions: moduleOptions,
         adminNotificationAccess,
         emailVerifiedAt: new Date(),
         isActive: true,
         mustChangePassword: true,
       },
-      select: {
-        publicId: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        phone: true,
-        adminModules: true,
-        adminNotificationAccess: true,
-        isActive: true,
-        createdAt: true,
-      },
+      select: TEAM_MEMBER_SELECT,
     });
   } catch (err) {
     if (err?.code === 'P2002') {
@@ -1408,6 +1835,7 @@ export async function createAdminTeamMember(actorPublicId, payload) {
       roleTitle,
       adminNotificationAccess,
       inviteMethod,
+      adminModuleOptions: moduleOptions,
     },
   });
   const createdRow = await prisma.user.findUnique({
@@ -1415,7 +1843,9 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     select: { id: true, email: true, firstName: true, lastName: true },
   });
   try {
-    if (createdRow) await issueTeamSetPasswordEmail(createdRow, roleTitle);
+    if (createdRow && (inviteMethod === 'invite' || emailCreds)) {
+      await issueTeamSetPasswordEmail(createdRow, roleTitle);
+    }
   } catch (error) {
     await writeAdminAudit({
       actorId: actorPublicId,
@@ -1426,11 +1856,26 @@ export async function createAdminTeamMember(actorPublicId, payload) {
     });
   }
   return {
-    ...created,
-    adminModules: serializeAdminAccess(created.adminModules),
-    roleTitle: created.phone || null,
+    ...mapTeamMemberRow(created),
     inviteMethod,
+    ...(oneTimePassword ? { oneTimePassword } : {}),
   };
+}
+
+function generateTeamOneTimePassword() {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%&*';
+  const all = upper + lower + digits + symbols;
+  const pick = (set) => set[crypto.randomInt(0, set.length)];
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+  for (let i = chars.length; i < 14; i += 1) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 }
 
 export async function setTeamMemberModules(actorPublicId, targetPublicId, modules) {
@@ -1457,17 +1902,7 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
   const updated = await prisma.user.update({
     where: { id: target.id },
     data: { adminModules: accessMap },
-    select: {
-      publicId: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      adminModules: true,
-      adminNotificationAccess: true,
-      isActive: true,
-      createdAt: true,
-    },
+    select: TEAM_MEMBER_SELECT,
   });
   await writeAdminAudit({
     actorId: actorPublicId,
@@ -1476,11 +1911,7 @@ export async function setTeamMemberModules(actorPublicId, targetPublicId, module
     entityId: updated.publicId,
     meta: { modules: normalized, access: accessMap },
   });
-  return {
-    ...updated,
-    adminModules: serializeAdminAccess(updated.adminModules),
-    roleTitle: updated.phone || null,
-  };
+  return mapTeamMemberRow(updated);
 }
 
 export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
@@ -1500,10 +1931,18 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   if (payload.lastName !== undefined) {
     data.lastName = payload.lastName ? String(payload.lastName).trim() : null;
   }
-  if (payload.roleTitle !== undefined) data.phone = payload.roleTitle ? String(payload.roleTitle).trim() : null;
+  if (payload.roleTitle !== undefined) {
+    data.roleTitle = payload.roleTitle ? String(payload.roleTitle).trim() : null;
+  }
+  if (payload.phone !== undefined) {
+    data.phone = payload.phone ? String(payload.phone).trim() : null;
+  }
   if (payload.isActive !== undefined) data.isActive = Boolean(payload.isActive);
   if (payload.adminNotificationAccess !== undefined) {
     data.adminNotificationAccess = Boolean(payload.adminNotificationAccess);
+  }
+  if (payload.adminModuleOptions !== undefined) {
+    data.adminModuleOptions = normalizeAdminModuleOptions(payload.adminModuleOptions);
   }
   if (payload.modules !== undefined || payload.access !== undefined) {
     const accessMap = normalizeTeamAccessPayload(payload.access ?? payload.modules);
@@ -1516,18 +1955,13 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
   const updated = await prisma.user.update({
     where: { id: target.id },
     data,
-    select: {
-      publicId: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      phone: true,
-      adminModules: true,
-      adminNotificationAccess: true,
-      isActive: true,
-      createdAt: true,
-    },
+    select: TEAM_MEMBER_SELECT,
   });
+
+  if (payload.address && typeof payload.address === 'object') {
+    await upsertTeamMemberAddress(target.id, payload.address);
+  }
+
   await writeAdminAudit({
     actorId: actorPublicId,
     action: 'TEAM_MEMBER_UPDATED',
@@ -1536,16 +1970,55 @@ export async function updateTeamMember(actorPublicId, targetPublicId, payload) {
     meta: {
       firstName: updated.firstName,
       lastName: updated.lastName,
-      roleTitle: updated.phone || null,
+      roleTitle: updated.roleTitle || null,
+      phone: updated.phone || null,
       isActive: updated.isActive,
       modules: updated.adminModules,
       adminNotificationAccess: updated.adminNotificationAccess,
+      adminModuleOptions: updated.adminModuleOptions,
     },
   });
-  return {
-    ...updated,
-    roleTitle: updated.phone || null,
+  return getAdminTeamMember(actorPublicId, updated.publicId);
+}
+
+async function upsertTeamMemberAddress(userId, address) {
+  const line1 = String(address.line1 || address.addressLine1 || address.street || '').trim();
+  const line2 = String(address.line2 || address.addressLine2 || '').trim();
+  const city = String(address.city || '').trim();
+  const state = String(address.state || '').trim();
+  const zip = String(address.zip || address.zipCode || '').trim();
+  const country = String(address.country || 'US').trim() || 'US';
+  const phoneNumber = address.phoneNumber != null ? String(address.phoneNumber).trim() || null : null;
+
+  if (!line1 && !city && !state && !zip) {
+    return;
+  }
+  if (!line1 || !city || !state || !zip) {
+    throw new AppError(400, 'Address needs street, city, state and ZIP.');
+  }
+
+  const existing = await prisma.address.findFirst({
+    where: { userId },
+    orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
+    select: { id: true },
+  });
+  const data = {
+    street: line1,
+    addressLine1: line1,
+    addressLine2: line2 || null,
+    city,
+    state,
+    zipCode: zip,
+    country,
+    phoneNumber,
+    isDefault: true,
+    addressType: 'BUSINESS',
   };
+  if (existing) {
+    await prisma.address.update({ where: { id: existing.id }, data });
+  } else {
+    await prisma.address.create({ data: { ...data, userId } });
+  }
 }
 
 async function findManagedTeamUser(targetPublicId) {
@@ -1558,6 +2031,7 @@ async function findManagedTeamUser(targetPublicId) {
       firstName: true,
       lastName: true,
       phone: true,
+      roleTitle: true,
       isActive: true,
       mustChangePassword: true,
       role: { select: { name: true } },
@@ -1579,7 +2053,7 @@ export async function resendTeamInvite(actorPublicId, targetPublicId) {
     where: { id: target.id },
     data: { mustChangePassword: true },
   });
-  await issueTeamSetPasswordEmail(target, target.phone);
+  await issueTeamSetPasswordEmail(target, target.roleTitle || target.phone);
   await writeAdminAudit({
     actorId: actorPublicId,
     action: 'TEAM_INVITE_RESENT',
@@ -1588,6 +2062,74 @@ export async function resendTeamInvite(actorPublicId, targetPublicId) {
     meta: { email: target.email },
   });
   return { publicId: target.publicId, email: target.email, invitePending: true };
+}
+
+export async function resetTeamMemberPassword(actorPublicId, targetPublicId) {
+  await assertActorIsAdmin(actorPublicId);
+  const target = await findManagedTeamUser(targetPublicId);
+  if (target.role?.name === 'ADMIN') {
+    throw new AppError(400, 'Reset the default admin password from the sign-in page.');
+  }
+  await prisma.user.update({
+    where: { id: target.id },
+    data: { mustChangePassword: true, tokenVersion: { increment: 1 } },
+  });
+  await issueTeamSetPasswordEmail(target, target.roleTitle || target.phone);
+  await writeAdminAudit({
+    actorId: actorPublicId,
+    action: 'TEAM_PASSWORD_RESET',
+    entityType: 'User',
+    entityId: target.publicId,
+    meta: { email: target.email },
+  });
+  return { publicId: target.publicId, email: target.email, invitePending: true };
+}
+
+export async function listTeamMemberActivity(actorPublicId, targetPublicId, { limit = 6 } = {}) {
+  void actorPublicId;
+  const target = await findManagedTeamUser(targetPublicId);
+  const take = Math.min(Math.max(Number(limit) || 6, 1), 50);
+  const rows = await prisma.adminAuditLog.findMany({
+    where: { actorId: target.publicId },
+    orderBy: { createdAt: 'desc' },
+    take,
+    select: {
+      publicId: true,
+      action: true,
+      entityType: true,
+      entityId: true,
+      meta: true,
+      createdAt: true,
+    },
+  });
+  const signIns = await prisma.adminAuditLog.findMany({
+    where: { actorId: target.publicId, action: 'STAFF_SIGN_IN' },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+    select: {
+      publicId: true,
+      meta: true,
+      createdAt: true,
+    },
+  });
+  return {
+    publicId: target.publicId,
+    events: rows.map((row) => ({
+      id: row.publicId,
+      action: row.action,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      meta: row.meta,
+      createdAt: row.createdAt,
+      ok: !String(row.action || '').includes('FAILED'),
+    })),
+    signIns: signIns.map((row) => ({
+      id: row.publicId,
+      createdAt: row.createdAt,
+      userAgent: row.meta?.userAgent || null,
+      ip: row.meta?.ip || null,
+    })),
+  };
 }
 
 export async function deleteTeamMember(actorPublicId, targetPublicId) {

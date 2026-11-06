@@ -5,6 +5,7 @@ import { inventoryScanDraftService } from '../services/inventory-scan-draft.serv
 import { scanRelayService } from '../services/scan-relay.service.js';
 import { validate } from '../utils/validation.js';
 import {
+  barcodeCodesBodySchema,
   barcodeEnsureSchema,
   barcodeListQuerySchema,
   barcodeLocationSchema,
@@ -238,9 +239,19 @@ export class InventoryController {
   }
 
   async listBarcodes(req, res) {
-    const { productId } = await validate(barcodeListQuerySchema, req.query);
-    const data = await barcodeService.listForProductPublicId(productId);
-    res.status(200).json({ success: true, data });
+    const query = await validate(barcodeListQuerySchema, req.query);
+    if (query.productId) {
+      const data = await barcodeService.listForProductPublicId(query.productId);
+      return res.status(200).json({ success: true, data });
+    }
+    const data = await barcodeService.listCatalog({
+      q: query.q,
+      status: query.status,
+      type: query.type,
+      page: query.page,
+      per: query.per,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
   async lookupBarcode(req, res) {
@@ -278,6 +289,28 @@ export class InventoryController {
       id: req.user?.id ?? null,
       email: req.user?.email ?? null,
     });
+    res.status(200).json({ success: true, data });
+  }
+
+  async markBarcodePrinted(req, res) {
+    const data = await barcodeService.markPrinted(req.params.code, {
+      id: req.user?.id ?? null,
+      email: req.user?.email ?? null,
+    });
+    res.status(200).json({ success: true, data });
+  }
+
+  async markBarcodesPrintedBulk(req, res) {
+    const body = await validate(barcodeCodesBodySchema, req.body ?? {});
+    const actor = { id: req.user?.id ?? null, email: req.user?.email ?? null };
+    const data = await barcodeService.markPrintedMany(body.codes, actor);
+    res.status(200).json({ success: true, data });
+  }
+
+  async markBarcodesSentBulk(req, res) {
+    const body = await validate(barcodeCodesBodySchema, req.body ?? {});
+    const actor = { id: req.user?.id ?? null, email: req.user?.email ?? null };
+    const data = await barcodeService.markSentMany(body.codes, actor);
     res.status(200).json({ success: true, data });
   }
 

@@ -31,17 +31,17 @@ describe('ORD-001 P6a/P6c — target query builders', () => {
     assert.deepEqual(buildPaymentPendingWhere(), { paymentStatus: 'UNPAID' });
   });
 
-  it('To Fulfill allows PAID|PARTIALLY_REFUNDED + ACCEPTED, excludes terminal status', () => {
+  it('To Fulfill allows PAID|PARTIALLY_REFUNDED + NEW_ORDER|ACCEPTED, excludes terminal status', () => {
     assert.deepEqual(buildToFulfillWhere(), {
-      fulfillmentStatus: 'ACCEPTED',
+      fulfillmentStatus: { in: ['NEW_ORDER', 'ACCEPTED'] },
       paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED'] },
       status: { notIn: ['CANCELLED', 'REFUNDED'] },
     });
   });
 
-  it('Pickup Ready allows PAID|PARTIALLY_REFUNDED + PICKUP_READY', () => {
+  it('Pickup Ready / Ready to ship allows PAID|PARTIALLY_REFUNDED + PICKUP_READY|LABEL_GENERATED', () => {
     assert.deepEqual(buildPickupReadyWhere(), {
-      fulfillmentStatus: 'PICKUP_READY',
+      fulfillmentStatus: { in: ['PICKUP_READY', 'LABEL_GENERATED'] },
       paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED'] },
       status: { notIn: ['CANCELLED', 'REFUNDED'] },
     });
@@ -176,8 +176,8 @@ describe('ORD-001 P6a — critical invariants encoded in target builders', () =>
   it('PICKUP_READY + tracking is not selected by buildShippedWhere shape', () => {
     const shipped = buildShippedWhere();
     const pickup = buildPickupReadyWhere();
-    assert.notEqual(shipped.fulfillmentStatus, pickup.fulfillmentStatus);
-    assert.equal(pickup.fulfillmentStatus, 'PICKUP_READY');
+    assert.notDeepEqual(shipped.fulfillmentStatus, pickup.fulfillmentStatus);
+    assert.deepEqual(pickup.fulfillmentStatus.in, ['PICKUP_READY', 'LABEL_GENERATED']);
     assert.ok(!shipped.fulfillmentStatus.in.includes('PICKUP_READY'));
     assert.ok(!shipped.fulfillmentStatus.in.includes('ACCEPTED'));
     assert.ok(!shipped.fulfillmentStatus.in.includes('LABEL_GENERATED'));

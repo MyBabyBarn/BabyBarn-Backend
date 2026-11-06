@@ -1,4 +1,6 @@
 import {
+  bulkHideProductReviews,
+  bulkRestoreProductReviews,
   createProductReview,
   deleteOwnProductReview,
   getAdminProductReview,
@@ -7,6 +9,7 @@ import {
   listProductReviewsPublic,
   rejectProductReview,
   removeProductReviewAdmin,
+  restoreProductReview,
   updateProductReview,
 } from '../services/product-review.service.js';
 import {
@@ -14,7 +17,9 @@ import {
   exportAdminPlatformReviewsCsv,
   getAdminPlatformReview,
   getPlatformReviewEligibility,
+  hidePlatformReview,
   listAdminPlatformReviews,
+  restorePlatformReview,
   updatePlatformReview,
 } from '../services/platform-review.service.js';
 import { validate } from '../utils/validation.js';
@@ -74,7 +79,24 @@ export const reviewController = {
   },
 
   async adminRejectProduct(req, res) {
-    const data = await rejectProductReview(req.user, req.params.id);
+    const data = await rejectProductReview(req.user, req.params.id, {
+      reason: req.body?.reason,
+    });
+    res.status(200).json({ success: true, data });
+  },
+
+  async adminRestoreProduct(req, res) {
+    const data = await restoreProductReview(req.user, req.params.id);
+    res.status(200).json({ success: true, data });
+  },
+
+  async adminBulkHideProducts(req, res) {
+    const data = await bulkHideProductReviews(req.user, req.body?.ids, req.body?.reason);
+    res.status(200).json({ success: true, data });
+  },
+
+  async adminBulkRestoreProducts(req, res) {
+    const data = await bulkRestoreProductReviews(req.user, req.body?.ids);
     res.status(200).json({ success: true, data });
   },
 
@@ -107,6 +129,16 @@ export const reviewController = {
 
   async adminGetPlatform(req, res) {
     const data = await getAdminPlatformReview(req.params.id);
+    res.status(200).json({ success: true, data });
+  },
+
+  async adminHidePlatform(req, res) {
+    const data = await hidePlatformReview(req.user, req.params.id);
+    res.status(200).json({ success: true, data });
+  },
+
+  async adminRestorePlatform(req, res) {
+    const data = await restorePlatformReview(req.user, req.params.id);
     res.status(200).json({ success: true, data });
   },
 
