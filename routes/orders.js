@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { orderController } from '../controllers/order.controller.js';
 import { authenticate, authorize, requireCustomerFullAccount } from '../middleware/auth.js';
 import {
+  requireAllTeamActions,
   requireConsoleModule,
   requireConsoleModuleAny,
   requireTeamAction,
@@ -40,26 +41,43 @@ router.get(
   requireConsoleModule('orders'),
   (req, res, next) => orderController.getAdminOrderStats(req, res).catch(next)
 );
+router.get(
+  '/admin/assignees',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.listOrderAssignees(req, res).catch(next)
+);
+router.patch(
+  '/admin/:id/assign',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'status'),
+  (req, res, next) => orderController.assignOrder(req, res).catch(next)
+);
 router.post(
   '/admin/bulk/fulfillment',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'status'),
   (req, res, next) => orderController.bulkOrderFulfillment(req, res).catch(next)
+);
+router.get(
+  '/admin/pickup-lists',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.listPickupLists(req, res).catch(next)
 );
 router.post(
   '/admin/pickup-lists',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'pick'),
   (req, res, next) => orderController.createPickupList(req, res).catch(next)
-);
-router.get(
-  '/admin/pickup-lists/:publicId',
-  authenticate,
-  authorize('ADMIN', 'ADMIN_TEAM'),
-  requireConsoleModule('orders'),
-  (req, res, next) => orderController.getPickupListPrintData(req, res).catch(next)
 );
 router.get(
   '/admin/pickup-lists/:publicId/pdf',
@@ -68,11 +86,50 @@ router.get(
   requireConsoleModule('orders'),
   (req, res, next) => orderController.getPickupListPdf(req, res, next)
 );
+router.get(
+  '/admin/pickup-lists/:publicId/print-data',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getPickupListPrintData(req, res).catch(next)
+);
+router.get(
+  '/admin/pickup-lists/:publicId',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  (req, res, next) => orderController.getPickupListDetail(req, res).catch(next)
+);
+router.post(
+  '/admin/pickup-lists/:publicId/scan',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'pick'),
+  (req, res, next) => orderController.scanPickupList(req, res).catch(next)
+);
+router.post(
+  '/admin/pickup-lists/:publicId/pick-all',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'pick'),
+  (req, res, next) => orderController.pickAllPickupListLine(req, res).catch(next)
+);
+router.post(
+  '/admin/pickup-lists/:publicId/complete',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'pick'),
+  (req, res, next) => orderController.completePickupList(req, res).catch(next)
+);
 router.patch(
   '/admin/:id/items/:itemId/pick',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'pick'),
   (req, res, next) => orderController.pickOrderItem(req, res).catch(next)
 );
 router.patch(
@@ -80,6 +137,7 @@ router.patch(
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'status'),
   (req, res, next) => orderController.patchOrderFulfillment(req, res).catch(next)
 );
 router.get(
@@ -101,6 +159,7 @@ router.post(
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   ordersOrShipping,
+  requireTeamAction('order-management', 'label'),
   (req, res, next) => orderController.generateAdminShippingLabel(req, res).catch(next)
 );
 router.post(
@@ -108,13 +167,30 @@ router.post(
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   ordersOrShipping,
+  requireTeamAction('order-management', 'label'),
   (req, res, next) => orderController.generateAdminUpsLabel(req, res).catch(next)
+);
+router.post(
+  '/admin/:id/void-label',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  ordersOrShipping,
+  requireTeamAction('order-management', 'label'),
+  (req, res, next) => orderController.voidAdminShippingLabel(req, res).catch(next)
+);
+router.post(
+  '/admin/:id/refresh-tracking',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  ordersOrShipping,
+  (req, res, next) => orderController.refreshAdminTracking(req, res).catch(next)
 );
 router.post(
   '/admin/bulk/ups-labels',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   ordersOrShipping,
+  requireTeamAction('order-management', 'label'),
   (req, res, next) => orderController.bulkGenerateAdminUpsLabels(req, res).catch(next)
 );
 router.get(
@@ -164,6 +240,7 @@ router.patch(
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireTeamAction('order-management', 'cancel'),
   (req, res, next) => orderController.updateOrderStatus(req, res).catch(next)
 );
 router.patch(
@@ -171,6 +248,10 @@ router.patch(
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('orders'),
+  requireAllTeamActions([
+    ['order-management', 'cancel'],
+    ['finance-management', 'refund'],
+  ]),
   (req, res, next) => orderController.refundOrder(req, res).catch(next)
 );
 router.patch(

@@ -65,6 +65,20 @@ router.get(
   requireConsoleModule('reviews'),
   (req, res, next) => reviewController.adminListProducts(req, res).catch(next)
 );
+router.post(
+  '/admin/products/bulk-hide',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('reviews'),
+  (req, res, next) => reviewController.adminBulkHideProducts(req, res).catch(next)
+);
+router.post(
+  '/admin/products/bulk-restore',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('reviews'),
+  (req, res, next) => reviewController.adminBulkRestoreProducts(req, res).catch(next)
+);
 router.get(
   '/admin/products/:id',
   authenticate,
@@ -78,6 +92,13 @@ router.post(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('reviews'),
   (req, res, next) => reviewController.adminRejectProduct(req, res).catch(next)
+);
+router.post(
+  '/admin/products/:id/restore',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('reviews'),
+  (req, res, next) => reviewController.adminRestoreProduct(req, res).catch(next)
 );
 router.delete(
   '/admin/products/:id',
@@ -107,6 +128,20 @@ router.get(
   authorize('ADMIN', 'ADMIN_TEAM'),
   requireConsoleModule('reviews'),
   (req, res, next) => reviewController.adminGetPlatform(req, res).catch(next)
+);
+router.post(
+  '/admin/platform/:id/hide',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('reviews'),
+  (req, res, next) => reviewController.adminHidePlatform(req, res).catch(next)
+);
+router.post(
+  '/admin/platform/:id/restore',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('reviews'),
+  (req, res, next) => reviewController.adminRestorePlatform(req, res).catch(next)
 );
 
 export default router;

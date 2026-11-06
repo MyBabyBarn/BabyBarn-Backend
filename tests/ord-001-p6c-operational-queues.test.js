@@ -3,9 +3,12 @@ import { describe, it } from 'node:test';
 import {
   buildAdminStatusGroupWhere,
   buildDeliveredWhere,
+  buildInProcessWhere,
+  buildNewOrderQueueWhere,
   buildPartiallyRefundedWhere,
   buildPaymentPendingWhere,
   buildPickupReadyWhere,
+  buildReadyToShipWhere,
   buildRefundedWhere,
   buildShippedWhere,
   buildToFulfillWhere,
@@ -24,10 +27,10 @@ describe('ORD-001 P6c — operational queue builders', () => {
     });
   });
 
-  describe('To Fulfill', () => {
-    it('PAID + ACCEPTED shape', () => {
+  describe('To Fulfill / New / In process', () => {
+    it('PAID + NEW_ORDER|ACCEPTED shape', () => {
       const w = buildToFulfillWhere();
-      assert.equal(w.fulfillmentStatus, 'ACCEPTED');
+      assert.deepEqual(w.fulfillmentStatus.in, ['NEW_ORDER', 'ACCEPTED']);
       assert.deepEqual(w.paymentStatus.in, ['PAID', 'PARTIALLY_REFUNDED']);
       assert.deepEqual(w.status.notIn, ['CANCELLED', 'REFUNDED']);
     });
@@ -36,14 +39,27 @@ describe('ORD-001 P6c — operational queue builders', () => {
       assert.deepEqual(buildAdminStatusGroupWhere('to_fulfill'), buildToFulfillWhere());
       assert.deepEqual(buildAdminStatusGroupWhere('pending'), buildToFulfillWhere());
     });
+
+    it('New = intake with zero picks; In process = some picks', () => {
+      assert.deepEqual(buildAdminStatusGroupWhere('new'), buildNewOrderQueueWhere());
+      assert.deepEqual(buildAdminStatusGroupWhere('in_process'), buildInProcessWhere());
+      assert.deepEqual(buildNewOrderQueueWhere().AND[1], {
+        orderItems: { every: { pickedQuantity: 0 } },
+      });
+      assert.deepEqual(buildInProcessWhere().AND[1], {
+        orderItems: { some: { pickedQuantity: { gt: 0 } } },
+      });
+    });
   });
 
-  describe('Pickup Ready', () => {
-    it('includes PARTIALLY_REFUNDED; no tracking predicate', () => {
+  describe('Pickup Ready / Ready to ship', () => {
+    it('includes LABEL_GENERATED + PARTIALLY_REFUNDED; no tracking predicate', () => {
       const w = buildPickupReadyWhere();
-      assert.equal(w.fulfillmentStatus, 'PICKUP_READY');
+      assert.deepEqual(w.fulfillmentStatus.in, ['PICKUP_READY', 'LABEL_GENERATED']);
       assert.deepEqual(w.paymentStatus.in, ['PAID', 'PARTIALLY_REFUNDED']);
       assert.equal(w.trackingNumber, undefined);
+      assert.deepEqual(buildReadyToShipWhere(), w);
+      assert.deepEqual(buildAdminStatusGroupWhere('ready_to_ship'), w);
     });
 
     it('PICKUP_READY not in Shipped', () => {
@@ -88,7 +104,7 @@ describe('ORD-001 P6c — operational queue builders', () => {
       const toFulfill = buildToFulfillWhere();
       const partial = buildPartiallyRefundedWhere();
       assert.ok(toFulfill.paymentStatus.in.includes('PARTIALLY_REFUNDED'));
-      assert.equal(toFulfill.fulfillmentStatus, 'ACCEPTED');
+      assert.ok(toFulfill.fulfillmentStatus.in.includes('ACCEPTED'));
       assert.equal(partial.paymentStatus, 'PARTIALLY_REFUNDED');
       assert.notEqual(toFulfill.status?.notIn?.includes('CANCELLED'), false);
       // Cancelled queue is status=CANCELLED only — partial cancel stays out
@@ -100,7 +116,10 @@ describe('ORD-001 P6c — operational queue builders', () => {
     for (const key of [
       'payment_pending',
       'to_fulfill',
+      'new',
+      'in_process',
       'pickup_ready',
+      'ready_to_ship',
       'shipped',
       'delivered',
       'cancelled',
@@ -126,14 +145,14 @@ function inPaymentPending(o) {
 }
 function inToFulfill(o) {
   return (
-    o.fulfillmentStatus === 'ACCEPTED' &&
+    ['NEW_ORDER', 'ACCEPTED'].includes(o.fulfillmentStatus) &&
     ['PAID', 'PARTIALLY_REFUNDED'].includes(o.paymentStatus) &&
     !['CANCELLED', 'REFUNDED'].includes(o.status)
   );
 }
 function inPickupReady(o) {
   return (
-    o.fulfillmentStatus === 'PICKUP_READY' &&
+    ['PICKUP_READY', 'LABEL_GENERATED'].includes(o.fulfillmentStatus) &&
     ['PAID', 'PARTIALLY_REFUNDED'].includes(o.paymentStatus) &&
     !['CANCELLED', 'REFUNDED'].includes(o.status)
   );

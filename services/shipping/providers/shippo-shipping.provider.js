@@ -109,13 +109,36 @@ export async function shippoBuyLabel(payload) {
     label_file_type: payload.labelFileType || 'PDF_4x6',
     async: false,
   });
+  const status = String(tx?.status || '').toUpperCase();
+  const trackingNumber = tx?.tracking_number || null;
+  const shippingLabelUrl = tx?.label_url || null;
+  if (status !== 'SUCCESS' || (!trackingNumber && !shippingLabelUrl)) {
+    const messages = Array.isArray(tx?.messages) ? tx.messages : [];
+    const detail = messages
+      .map((m) => m?.text || m?.code || '')
+      .filter(Boolean)
+      .join('; ');
+    const detailLower = detail.toLowerCase();
+    const addressInvalid =
+      detailLower.includes('address') &&
+      (detailLower.includes('invalid') ||
+        detailLower.includes('not found') ||
+        detailLower.includes('incomplete') ||
+        detailLower.includes('recipient'));
+    throw new AppError(
+      addressInvalid ? 400 : 502,
+      detail || `Shippo label purchase failed (${status || 'UNKNOWN'})`,
+      addressInvalid ? 'SHIPPING_ADDRESS_INVALID' : 'SHIPPO_LABEL_FAILED',
+      { status: tx?.status || null, messages, transactionId: tx?.object_id || null }
+    );
+  }
   return {
     provider: 'shippo',
     transactionId: tx.object_id,
     status: tx.status,
-    trackingNumber: tx.tracking_number || null,
-    shippingCarrier: tx.tracking_status?.carrier || tx.rate?.provider || null,
-    shippingLabelUrl: tx.label_url || null,
+    trackingNumber,
+    shippingCarrier: tx.tracking_status?.carrier || tx.rate?.provider || 'USPS',
+    shippingLabelUrl,
     qrCodeUrl: tx.qr_code_url || null,
     messages: tx.messages || [],
     raw: tx,

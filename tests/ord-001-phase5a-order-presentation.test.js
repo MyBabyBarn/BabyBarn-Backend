@@ -25,7 +25,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
         fulfillmentStatus: null,
       });
       assert.equal(p.customerLabel, 'Pending');
-      assert.equal(p.adminLabel, 'Pending');
+      assert.equal(p.adminLabel, 'Payment pending');
       assert.equal(p.key, 'pending');
     });
 
@@ -39,7 +39,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
       assert.equal(p.adminLabel, 'Processing');
     });
 
-    it('paid ACCEPTED → Preparing to ship / Accepted', () => {
+    it('paid ACCEPTED → Preparing to ship / New', () => {
       const p = deriveOrderPresentation({
         status: 'PROCESSING',
         paymentStatus: 'PAID',
@@ -47,10 +47,10 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
       });
       assert.equal(p.key, 'accepted');
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Accepted');
+      assert.equal(p.adminLabel, 'New');
     });
 
-    it('paid PICKUP_READY → Preparing to ship / Pickup ready', () => {
+    it('paid PICKUP_READY → Preparing to ship / Ready to ship', () => {
       const p = deriveOrderPresentation({
         status: 'PROCESSING',
         paymentStatus: 'PAID',
@@ -58,7 +58,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
       });
       assert.equal(p.key, 'pickup_ready');
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Pickup ready');
+      assert.equal(p.adminLabel, 'Ready to ship');
     });
 
     it('shipped', () => {
@@ -118,7 +118,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
       assert.notEqual(p.customerLabel, 'Shipped');
       assert.notEqual(p.adminLabel, 'Shipped');
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Pickup ready');
+      assert.equal(p.adminLabel, 'Ready to ship');
       assert.equal(p.key, 'pickup_ready');
     });
 
@@ -131,7 +131,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
         shippingLabelUrl: 'https://example.com/label.pdf',
       });
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Accepted');
+      assert.equal(p.adminLabel, 'New');
     });
   });
 
@@ -347,7 +347,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
         isPartiallyCancelled: true,
       });
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Accepted');
+      assert.equal(p.adminLabel, 'New');
     });
 
     it('partial cancellation + partially refunded', () => {
@@ -358,7 +358,7 @@ describe('ORD-001 Phase 5A — deriveOrderPresentation', () => {
         isPartiallyCancelled: true,
       });
       assert.equal(p.customerLabel, 'Preparing to ship');
-      assert.equal(p.adminLabel, 'Accepted');
+      assert.equal(p.adminLabel, 'New');
       assert.equal(p.payment?.label, 'Partially refunded');
     });
   });

@@ -16,6 +16,8 @@ import {
   orderFulfillmentActionSchema,
   orderBulkFulfillmentSchema,
   pickupListCreateSchema,
+  pickupListListQuerySchema,
+  pickupListScanSchema,
   orderItemPickSchema,
 } from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
@@ -144,6 +146,10 @@ export class OrderController {
     const statusGroup = req.query.statusGroup ? String(req.query.statusGroup) : undefined;
 
     const fulfillmentStatus = req.query.fulfillmentStatus ? String(req.query.fulfillmentStatus) : undefined;
+    const assignedTo = req.query.assignedTo ? String(req.query.assignedTo) : undefined;
+    const unassignedOnly = req.query.unassignedOnly;
+    const shippingCarrier = req.query.shippingCarrier ? String(req.query.shippingCarrier) : undefined;
+    const shipStatus = req.query.shipStatus ? String(req.query.shipStatus) : undefined;
 
     const result = await orderService.getAllOrders(page, limit, {
       search,
@@ -156,6 +162,10 @@ export class OrderController {
       sortBy,
       sortOrder,
       fulfillmentStatus,
+      assignedTo,
+      unassignedOnly,
+      shippingCarrier,
+      shipStatus,
     });
 
     res.status(200).json({
@@ -208,10 +218,17 @@ export class OrderController {
 
   async refundOrder(req, res) {
     const { id } = req.params;
-    const order = await orderService.refundOrder(id, adminActor(req));
+    const rawAmount = req.body?.amount;
+    const amount =
+      rawAmount === undefined || rawAmount === null || rawAmount === ''
+        ? undefined
+        : Number(rawAmount);
+    const order = await orderService.refundOrder(id, adminActor(req), {
+      amount: Number.isFinite(amount) ? amount : undefined,
+    });
     res.status(200).json({
       success: true,
-      message: 'Order marked as refunded',
+      message: 'Order refund processed',
       data: toPublicJson(order),
     });
   }
@@ -228,6 +245,26 @@ export class OrderController {
     const body = await validate(trackingUpdateSchema, req.body);
     const order = await orderService.addTracking(id, body, adminActor(req));
     res.status(200).json({ success: true, data: toPublicJson(order) });
+  }
+
+  async voidAdminShippingLabel(req, res) {
+    const { id } = req.params;
+    const order = await orderService.voidAdminShippingLabel(id, adminActor(req));
+    res.status(200).json({
+      success: true,
+      message: 'Shipping label voided',
+      data: toPublicJson(order),
+    });
+  }
+
+  async refreshAdminTracking(req, res) {
+    const { id } = req.params;
+    const order = await orderService.refreshAdminTracking(id, adminActor(req));
+    res.status(200).json({
+      success: true,
+      message: 'Tracking refreshed',
+      data: toPublicJson(order),
+    });
   }
 
   async getOrderActivity(req, res) {
@@ -329,6 +366,31 @@ export class OrderController {
     });
   }
 
+  async listOrderAssignees(req, res) {
+    const data = await orderService.listOrderAssignees();
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async assignOrder(req, res) {
+    const { id } = req.params;
+    const assigneePublicId =
+      req.body?.assigneePublicId === undefined
+        ? undefined
+        : req.body?.assigneePublicId === null
+          ? null
+          : String(req.body.assigneePublicId);
+    const order = await orderService.assignOrder(
+      id,
+      { assigneePublicId: assigneePublicId === undefined ? null : assigneePublicId },
+      adminActor(req)
+    );
+    res.status(200).json({
+      success: true,
+      message: assigneePublicId ? 'Order assigned' : 'Assignment cleared',
+      data: toPublicJson(order),
+    });
+  }
+
   async patchOrderFulfillment(req, res) {
     const { id } = req.params;
     const body = await validate(orderFulfillmentActionSchema, req.body);
@@ -349,10 +411,22 @@ export class OrderController {
     res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
+  async listPickupLists(req, res) {
+    const query = await validate(pickupListListQuerySchema, req.query);
+    const data = await orderService.listPickupLists(query);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
   async createPickupList(req, res) {
     const body = await validate(pickupListCreateSchema, req.body);
     const list = await orderService.createPickupList(body, adminActor(req));
     res.status(201).json({ success: true, data: toPublicJson(list) });
+  }
+
+  async getPickupListDetail(req, res) {
+    const { publicId } = req.params;
+    const data = await orderService.getPickupListDetail(publicId);
+    res.status(200).json({ success: true, data: toPublicJson(data) });
   }
 
   async getPickupListPrintData(req, res) {
@@ -373,6 +447,39 @@ export class OrderController {
     } catch (e) {
       next(e);
     }
+  }
+
+  async scanPickupList(req, res) {
+    const { publicId } = req.params;
+    const body = await validate(pickupListScanSchema, req.body);
+    const data = await orderService.scanPickupListSku(publicId, body, adminActor(req));
+    res.status(200).json({ success: true, message: data.message, data: toPublicJson(data.list) });
+  }
+
+  async pickAllPickupListLine(req, res) {
+    const { publicId } = req.params;
+    const sku = String(req.body?.sku || '').trim();
+    const loc = req.body?.loc != null ? String(req.body.loc) : undefined;
+    if (!sku) {
+      res.status(400).json({ success: false, message: 'sku is required' });
+      return;
+    }
+    const data = await orderService.pickAllOnPickupListLine(
+      publicId,
+      { sku, loc },
+      adminActor(req)
+    );
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async completePickupList(req, res) {
+    const { publicId } = req.params;
+    const data = await orderService.completePickupList(publicId, adminActor(req));
+    res.status(200).json({
+      success: true,
+      message: 'Pickup list completed. Orders are ready to ship.',
+      data: toPublicJson(data),
+    });
   }
 
   async getOrderPdf(req, res, next) {
