@@ -89,26 +89,80 @@ function toOwnerReview(row) {
   };
 }
 
+const HIDE_REASONS = new Set([
+  'Not about the product',
+  'Personal details',
+  'Offensive language',
+  'Advertising or link',
+  'Other',
+]);
+
+function titleFromBody(body) {
+  const text = String(body || '').trim();
+  if (!text) return 'Review';
+  const first = text.split(/\r?\n/)[0].trim();
+  return first.length > 80 ? `${first.slice(0, 77)}…` : first;
+}
+
+function bodyHasLink(body) {
+  return /https?:\/\/|www\./i.test(String(body || ''));
+}
+
+function variantLabel(combination) {
+  if (!combination || typeof combination !== 'object') return null;
+  const parts = Object.values(combination)
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function needsLookFlags(row) {
+  const flags = [];
+  if (row.rating <= 2) flags.push('Low rating');
+  if (bodyHasLink(row.body)) flags.push('Contains a link');
+  return flags;
+}
+
 function toAdminReview(row) {
+  const flags = needsLookFlags(row);
+  const age =
+    variantLabel(row.orderItem?.productVariant?.combination) ||
+    (Array.isArray(row.product?.ageGroups) && row.product.ageGroups.length
+      ? row.product.ageGroups.join(', ')
+      : null);
   return {
     id: row.publicId,
     rating: row.rating,
+    title: titleFromBody(row.body),
     body: row.body,
     imageUrls: Array.isArray(row.imageUrls) ? row.imageUrls : [],
     status: row.status,
+    statusLabel: row.status === 'REJECTED' ? 'Hidden' : 'Published',
+    hideReason: row.hideReason || null,
+    needsLook: row.status === 'APPROVED' && flags.length > 0,
+    lookFlags: flags,
     reviewerName: row.reviewerDisplayName,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,
     product: row.product
-      ? { id: row.product.publicId, name: row.product.name, slug: row.product.slug }
+      ? {
+          id: row.product.publicId,
+          name: row.product.name,
+          slug: row.product.slug,
+          imageUrl: row.product.imageUrl ?? null,
+        }
       : null,
+    productSize: age,
     customer: row.user
       ? {
           id: row.user.publicId,
           email: row.user.email,
           name: displayName(row.user),
         }
+      : null,
+    order: row.order
+      ? { id: row.order.publicId, orderNumber: row.order.orderNumber }
       : null,
   };
 }
@@ -314,38 +368,70 @@ export async function deleteOwnProductReview(user, publicId) {
   return { id: existing.publicId, deleted: true };
 }
 
+const adminInclude = {
+  product: { select: { publicId: true, name: true, slug: true, imageUrl: true, ageGroups: true } },
+  user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
+  order: { select: { publicId: true, orderNumber: true } },
+  orderItem: {
+    select: {
+      productVariant: { select: { combination: true } },
+    },
+  },
+};
+
 export async function getAdminProductReview(publicId) {
   const row = await prisma.productReview.findFirst({
     where: { publicId: String(publicId), deletedAt: null },
-    include: {
-      product: { select: { publicId: true, name: true, slug: true, imageUrl: true } },
-      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-      order: { select: { publicId: true, orderNumber: true } },
-    },
+    include: adminInclude,
   });
   if (!row) throw new AppError(404, 'Review not found');
-  return {
-    ...toAdminReview(row),
-    product: row.product
-      ? {
-          id: row.product.publicId,
-          name: row.product.name,
-          slug: row.product.slug,
-          imageUrl: row.product.imageUrl ?? null,
-        }
-      : null,
-    order: row.order
-      ? { id: row.order.publicId, orderNumber: row.order.orderNumber }
-      : null,
-  };
+  return toAdminReview(row);
 }
 
-export async function listAdminProductReviews({ search, status, rating, page = 1, limit = 20 } = {}) {
+function parseStatusFilter(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  if (!v || v === 'all') return null;
+  if (v === 'approved' || v === 'published' || v === 'pub') return 'APPROVED';
+  if (v === 'rejected' || v === 'hidden' || v === 'hid') return 'REJECTED';
+  if (raw === 'APPROVED' || raw === 'REJECTED') return raw;
+  return null;
+}
+
+function parseRatingFilter(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  if (!v || v === 'all') return null;
+  if (v === 'low') return 'low';
+  const n = Number(v);
+  if (Number.isInteger(n) && n >= 1 && n <= 5) return n;
+  return null;
+}
+
+export async function listAdminProductReviews({
+  search,
+  status,
+  rating,
+  quick,
+  page = 1,
+  limit = 20,
+} = {}) {
   const take = Math.min(100, Math.max(1, Number(limit) || 20));
   const currentPage = Math.max(1, Number(page) || 1);
   const where = { deletedAt: null };
-  if (status === 'APPROVED' || status === 'REJECTED') where.status = status;
-  if (rating != null && rating !== '') where.rating = clampRating(rating);
+  const statusFilter = parseStatusFilter(status);
+  const qk = String(quick || '').toLowerCase();
+  if (qk === 'pub' || qk === 'published') where.status = 'APPROVED';
+  else if (qk === 'hid' || qk === 'hidden') where.status = 'REJECTED';
+  else if (qk === 'need' || qk === 'needs') {
+    where.status = 'APPROVED';
+    where.rating = { lte: 2 };
+  } else if (statusFilter) {
+    where.status = statusFilter;
+  }
+
+  const rate = parseRatingFilter(rating);
+  if (rate === 'low') where.rating = { ...(where.rating || {}), lte: 2 };
+  else if (typeof rate === 'number') where.rating = rate;
+
   if (search && String(search).trim()) {
     const q = String(search).trim();
     where.OR = [
@@ -353,39 +439,86 @@ export async function listAdminProductReviews({ search, status, rating, page = 1
       { reviewerDisplayName: { contains: q, mode: 'insensitive' } },
       { product: { name: { contains: q, mode: 'insensitive' } } },
       { user: { email: { contains: q, mode: 'insensitive' } } },
+      { user: { firstName: { contains: q, mode: 'insensitive' } } },
+      { user: { lastName: { contains: q, mode: 'insensitive' } } },
+      { order: { orderNumber: { contains: q, mode: 'insensitive' } } },
+      { publicId: { contains: q, mode: 'insensitive' } },
     ];
   }
-  const [rows, total] = await Promise.all([
-    prisma.productReview.findMany({
-      where,
-      include: {
-        product: { select: { publicId: true, name: true, slug: true } },
-        user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      skip: (currentPage - 1) * take,
-      take,
-    }),
-    prisma.productReview.count({ where }),
-  ]);
+
+  const [rows, total, publishedCount, hiddenCount, needCount, ratingGroups, allCount, platformCount] =
+    await Promise.all([
+      prisma.productReview.findMany({
+        where,
+        include: adminInclude,
+        orderBy: { createdAt: 'desc' },
+        skip: (currentPage - 1) * take,
+        take,
+      }),
+      prisma.productReview.count({ where }),
+      prisma.productReview.count({ where: { deletedAt: null, status: 'APPROVED' } }),
+      prisma.productReview.count({ where: { deletedAt: null, status: 'REJECTED' } }),
+      prisma.productReview.count({
+        where: { deletedAt: null, status: 'APPROVED', rating: { lte: 2 } },
+      }),
+      prisma.productReview.groupBy({
+        by: ['rating'],
+        where: { deletedAt: null, status: 'APPROVED' },
+        _count: { _all: true },
+      }),
+      prisma.productReview.count({ where: { deletedAt: null } }),
+      prisma.platformReview.count(),
+    ]);
+
+  const breakdown = emptyBreakdown();
+  let sum = 0;
+  let published = 0;
+  for (const g of ratingGroups) {
+    const star = g.rating;
+    const count = g._count._all;
+    if (star >= 1 && star <= 5) {
+      breakdown[star] = count;
+      published += count;
+      sum += star * count;
+    }
+  }
+
   return {
     items: rows.map(toAdminReview),
     pagination: { page: currentPage, limit: take, total, pages: Math.ceil(total / take) || 1 },
+    summary: {
+      publishedCount: published,
+      averageRating: published ? Math.round((sum / published) * 10) / 10 : null,
+      breakdown,
+    },
+    quickCounts: {
+      need: needCount,
+      pub: publishedCount,
+      hid: hiddenCount,
+    },
+    tabCounts: {
+      prod: allCount,
+      plat: platformCount,
+    },
   };
 }
 
-export async function rejectProductReview(user, publicId) {
+export async function rejectProductReview(user, publicId, { reason } = {}) {
+  const why = String(reason || '').trim();
+  if (!why || !HIDE_REASONS.has(why)) {
+    throw new AppError(400, 'Choose a valid hide reason.', 'REVIEW_HIDE_REASON_REQUIRED');
+  }
   const existing = await prisma.productReview.findFirst({
     where: { publicId: String(publicId), deletedAt: null },
   });
   if (!existing) throw new AppError(404, 'Review not found');
+  if (existing.status === 'REJECTED') {
+    return getAdminProductReview(existing.publicId);
+  }
   const row = await prisma.productReview.update({
     where: { id: existing.id },
-    data: { status: 'REJECTED' },
-    include: {
-      product: { select: { publicId: true, name: true, slug: true } },
-      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-    },
+    data: { status: 'REJECTED', hideReason: why },
+    include: adminInclude,
   });
   await recomputeProductRating(existing.productId);
   await writeAdminAudit({
@@ -393,9 +526,53 @@ export async function rejectProductReview(user, publicId) {
     action: 'PRODUCT_REVIEW_REJECTED',
     entityType: 'ProductReview',
     entityId: row.publicId,
+    meta: { productId: row.product?.publicId, rating: row.rating, reason: why },
+  });
+  return toAdminReview(row);
+}
+
+export async function restoreProductReview(user, publicId) {
+  const existing = await prisma.productReview.findFirst({
+    where: { publicId: String(publicId), deletedAt: null },
+  });
+  if (!existing) throw new AppError(404, 'Review not found');
+  if (existing.status === 'APPROVED') {
+    return getAdminProductReview(existing.publicId);
+  }
+  const row = await prisma.productReview.update({
+    where: { id: existing.id },
+    data: { status: 'APPROVED', hideReason: null },
+    include: adminInclude,
+  });
+  await recomputeProductRating(existing.productId);
+  await writeAdminAudit({
+    ...actorOf(user),
+    action: 'PRODUCT_REVIEW_RESTORED',
+    entityType: 'ProductReview',
+    entityId: row.publicId,
     meta: { productId: row.product?.publicId, rating: row.rating },
   });
   return toAdminReview(row);
+}
+
+export async function bulkHideProductReviews(user, ids, reason) {
+  const list = Array.isArray(ids) ? ids.map((id) => String(id)).filter(Boolean) : [];
+  if (!list.length) throw new AppError(400, 'Select at least one review.');
+  const out = [];
+  for (const id of list) {
+    out.push(await rejectProductReview(user, id, { reason }));
+  }
+  return { items: out, count: out.length };
+}
+
+export async function bulkRestoreProductReviews(user, ids) {
+  const list = Array.isArray(ids) ? ids.map((id) => String(id)).filter(Boolean) : [];
+  if (!list.length) throw new AppError(400, 'Select at least one review.');
+  const out = [];
+  for (const id of list) {
+    out.push(await restoreProductReview(user, id));
+  }
+  return { items: out, count: out.length };
 }
 
 export async function removeProductReviewAdmin(user, publicId) {
@@ -406,10 +583,7 @@ export async function removeProductReviewAdmin(user, publicId) {
   const row = await prisma.productReview.update({
     where: { id: existing.id },
     data: { deletedAt: new Date() },
-    include: {
-      product: { select: { publicId: true, name: true, slug: true } },
-      user: { select: { publicId: true, email: true, firstName: true, lastName: true } },
-    },
+    include: adminInclude,
   });
   await recomputeProductRating(existing.productId);
   await writeAdminAudit({
@@ -421,3 +595,5 @@ export async function removeProductReviewAdmin(user, publicId) {
   });
   return toAdminReview(row);
 }
+
+export { HIDE_REASONS };

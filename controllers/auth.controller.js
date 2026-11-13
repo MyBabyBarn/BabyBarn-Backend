@@ -38,6 +38,7 @@ export class AuthController {
     const data = await validate(loginSchema, req.body);
     const result = await authService.login(data.email, data.password, data.portal, {
       ip: req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress,
+      userAgent: req.headers['user-agent'],
     });
 
     res.status(200).json({

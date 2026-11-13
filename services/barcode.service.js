@@ -21,6 +21,8 @@ const PRODUCT_LIVE = {
   reservedStock: true,
   productType: true,
   warehouseLocation: true,
+  imageUrl: true,
+  isDraft: true,
 };
 
 const VARIANT_LIVE = {
@@ -67,6 +69,13 @@ async function allocateCode(tx) {
   throw new AppError(500, 'Could not generate barcode');
 }
 
+/** Prototype label workflow: Generated → Printed → Sent. */
+export function barcodeWorkflowStatus(row) {
+  if (row.sentToVendorAt) return 'Sent';
+  if (row.printedAt) return 'Printed';
+  return 'Generated';
+}
+
 export function toLookup(row) {
   const product = row.product;
   const variant = row.productVariant;
@@ -74,9 +83,12 @@ export function toLookup(row) {
   const reserved = variant ? variant.reservedStock : product.reservedStock;
   const location = variant?.warehouseLocation || product.warehouseLocation || null;
   const price = variant?.priceOverride != null ? variant.priceOverride : product.price;
+  const status = barcodeWorkflowStatus(row);
   return {
     id: row.publicId,
     code: row.code,
+    status,
+    printedAt: row.printedAt,
     sentToVendorAt: row.sentToVendorAt,
     createdAt: row.createdAt,
     aliases: (row.aliases || []).map((a) => a.code),
@@ -92,6 +104,7 @@ export function toLookup(row) {
       availableStock: availableOf(product.stock, product.reservedStock),
       productType: product.productType,
       warehouseLocation: product.warehouseLocation || null,
+      imageUrl: product.imageUrl || null,
     },
     variant: variant
       ? {
@@ -227,6 +240,84 @@ export async function listForProductPublicId(productPublicId) {
   return rows.map(toLookup);
 }
 
+/**
+ * Global Labels & barcodes catalog (prototype #/m/barcodes).
+ * Read-only listing — does not ensure missing codes.
+ */
+export async function listCatalog({
+  q = '',
+  status = 'all',
+  type = 'all',
+  page = 1,
+  per = 12,
+} = {}) {
+  const productFilter = {
+    isDraft: false,
+    ...(type === 'new' ? { productType: 'NEW' } : {}),
+    ...(type === 'refurbished' ? { productType: 'REFURBISHED' } : {}),
+  };
+
+  const and = [{ product: productFilter }];
+
+  if (status === 'Generated') {
+    and.push({ printedAt: null, sentToVendorAt: null });
+  } else if (status === 'Printed') {
+    and.push({ printedAt: { not: null }, sentToVendorAt: null });
+  } else if (status === 'Sent') {
+    and.push({ sentToVendorAt: { not: null } });
+  }
+
+  const needle = String(q || '').trim();
+  if (needle) {
+    and.push({
+      OR: [
+        { code: { contains: needle, mode: 'insensitive' } },
+        { product: { name: { contains: needle, mode: 'insensitive' } } },
+        { product: { sku: { contains: needle, mode: 'insensitive' } } },
+        { productVariant: { sku: { contains: needle, mode: 'insensitive' } } },
+      ],
+    });
+  }
+
+  const where = { AND: and };
+  const baseWhere = { product: productFilter };
+
+  const [total, rows, kpiAll, kpiGenerated, kpiPrinted, kpiSent] = await Promise.all([
+    prisma.productBarcode.count({ where }),
+    prisma.productBarcode.findMany({
+      where,
+      include: BARCODE_INCLUDE,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      skip: (page - 1) * per,
+      take: per,
+    }),
+    prisma.productBarcode.count({ where: baseWhere }),
+    prisma.productBarcode.count({
+      where: { ...baseWhere, printedAt: null, sentToVendorAt: null },
+    }),
+    prisma.productBarcode.count({
+      where: { ...baseWhere, printedAt: { not: null }, sentToVendorAt: null },
+    }),
+    prisma.productBarcode.count({
+      where: { ...baseWhere, sentToVendorAt: { not: null } },
+    }),
+  ]);
+
+  return {
+    items: rows.map(toLookup),
+    total,
+    page,
+    per,
+    pages: Math.max(1, Math.ceil(total / per)),
+    kpis: {
+      all: kpiAll,
+      generated: kpiGenerated,
+      printed: kpiPrinted,
+      sent: kpiSent,
+    },
+  };
+}
+
 async function findSellableBySku(sku) {
   const q = String(sku || '').trim();
   if (!q) return null;
@@ -276,7 +367,10 @@ export async function markSent(code, actor) {
 
   const updated = await prisma.productBarcode.update({
     where: { id: row.id },
-    data: { sentToVendorAt: new Date() },
+    data: {
+      sentToVendorAt: new Date(),
+      printedAt: row.printedAt || new Date(),
+    },
     include: BARCODE_INCLUDE,
   });
   await writeAdminAudit({
@@ -288,6 +382,43 @@ export async function markSent(code, actor) {
     meta: { productId: updated.product.publicId, variantId: updated.productVariant?.publicId ?? null },
   });
   return toLookup(updated);
+}
+
+export async function markPrinted(code, actor) {
+  const row = await findByCode(code);
+  if (!row) throw new AppError(404, 'Barcode not found', 'BARCODE_NOT_FOUND');
+  if (row.printedAt || row.sentToVendorAt) return toLookup(row);
+
+  const updated = await prisma.productBarcode.update({
+    where: { id: row.id },
+    data: { printedAt: new Date() },
+    include: BARCODE_INCLUDE,
+  });
+  await writeAdminAudit({
+    actorId: actor?.id ?? null,
+    actorEmail: actor?.email ?? null,
+    action: 'BARCODE_PRINTED',
+    entityType: 'ProductBarcode',
+    entityId: updated.code,
+    meta: { productId: updated.product.publicId, variantId: updated.productVariant?.publicId ?? null },
+  });
+  return toLookup(updated);
+}
+
+export async function markPrintedMany(codes, actor) {
+  const out = [];
+  for (const code of codes) {
+    out.push(await markPrinted(code, actor));
+  }
+  return out;
+}
+
+export async function markSentMany(codes, actor) {
+  const out = [];
+  for (const code of codes) {
+    out.push(await markSent(code, actor));
+  }
+  return out;
 }
 
 export async function regenerate(code, { confirmSent = false, actor } = {}) {
@@ -311,7 +442,7 @@ export async function regenerate(code, { confirmSent = false, actor } = {}) {
     }
     return tx.productBarcode.update({
       where: { id: row.id },
-      data: { code: nextCode, sentToVendorAt: null },
+      data: { code: nextCode, sentToVendorAt: null, printedAt: null },
       include: BARCODE_INCLUDE,
     });
   });
@@ -387,12 +518,17 @@ export const barcodeService = {
   snapshotVariantBarcodeSkus,
   reattachVariantBarcodes,
   listForProductPublicId,
+  listCatalog,
   lookup,
   ensureBySku,
   markSent,
+  markSentMany,
+  markPrinted,
+  markPrintedMany,
   regenerate,
   updateLocation,
   renderLabelPdf,
   renderLabelPng,
   toLookup,
+  barcodeWorkflowStatus,
 };

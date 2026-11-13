@@ -237,6 +237,13 @@ const userForOrderList = {
   },
 };
 
+const staffAssigneeSelect = {
+  publicId: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+};
+
 function parseDateOrNull(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -1380,6 +1387,89 @@ export class OrderService {
     return { monthTotal, pendingFulfillment, pendingCancellation };
   }
 
+  async listOrderAssignees() {
+    return prisma.user.findMany({
+      where: {
+        portalScope: 'STAFF',
+        isActive: true,
+        role: { name: { in: ['ADMIN', 'ADMIN_TEAM'] } },
+      },
+      select: {
+        ...staffAssigneeSelect,
+        role: { select: { name: true } },
+      },
+      orderBy: [{ firstName: 'asc' }, { email: 'asc' }],
+      take: 200,
+    });
+  }
+
+  /**
+   * Assign / reassign / clear order owner.
+   * @param {string} orderPublicId
+   * @param {{ assigneePublicId?: string|null }} body — null/empty clears
+   * @param {{ id?: string, email?: string }} actor
+   */
+  async assignOrder(orderPublicId, body, actor) {
+    const order = await prisma.order.findUnique({
+      where: { publicId: orderPublicId },
+      select: { id: true, publicId: true, orderNumber: true, assignedToUserId: true },
+    });
+    if (!order) throw new AppError(404, 'Order not found');
+
+    const assigneePublicId =
+      body?.assigneePublicId === undefined || body?.assigneePublicId === null
+        ? null
+        : String(body.assigneePublicId).trim() || null;
+
+    let assigneeId = null;
+    let assignee = null;
+    if (assigneePublicId) {
+      assignee = await prisma.user.findFirst({
+        where: {
+          publicId: assigneePublicId,
+          portalScope: 'STAFF',
+          isActive: true,
+          role: { name: { in: ['ADMIN', 'ADMIN_TEAM'] } },
+        },
+        select: { id: true, ...staffAssigneeSelect },
+      });
+      if (!assignee) throw new AppError(400, 'Assignee must be an active staff user', 'INVALID_ASSIGNEE');
+      assigneeId = assignee.id;
+    }
+
+    const actorUserId = await resolveActorUserId(actor);
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        assignedToUserId: assigneeId,
+        assignedAt: assigneeId ? new Date() : null,
+        assignedByUserId: assigneeId ? actorUserId : null,
+      },
+      include: {
+        orderItems: { include: { product: true } },
+        user: userForOrderList,
+        assignedTo: { select: staffAssigneeSelect },
+        assignedBy: { select: staffAssigneeSelect },
+      },
+    });
+
+    await writeAdminAudit({
+      actorUserId,
+      actorEmail: actor?.email || null,
+      action: assigneeId ? 'ORDER_ASSIGNED' : 'ORDER_UNASSIGNED',
+      entityType: 'Order',
+      entityId: order.publicId,
+      meta: {
+        orderNumber: order.orderNumber,
+        assigneePublicId: assignee?.publicId || null,
+        assigneeEmail: assignee?.email || null,
+        previousAssigneeUserId: order.assignedToUserId,
+      },
+    });
+
+    return updated;
+  }
+
   async getAllOrders(page = 1, limit = 20, filters = {}) {
     const skip = (page - 1) * limit;
     const {
@@ -1393,6 +1483,10 @@ export class OrderService {
       sortBy = 'createdAt',
       sortOrder = 'desc',
       fulfillmentStatus,
+      assignedTo,
+      unassignedOnly,
+      shippingCarrier,
+      shipStatus,
     } = filters;
 
     const and = [];
@@ -1403,6 +1497,57 @@ export class OrderService {
       and.push(statusGroupWhere);
     } else if (st) {
       and.push({ status: st });
+    }
+    const car = shippingCarrier && String(shippingCarrier).trim().toLowerCase();
+    if (car === 'manual') {
+      and.push({ trackingNumber: { not: null }, shippingLabelUrl: null });
+    } else if (car === 'ups') {
+      and.push({
+        OR: [
+          { shippingCarrier: { contains: 'UPS', mode: 'insensitive' } },
+          { selectedRateProvider: { contains: 'UPS', mode: 'insensitive' } },
+        ],
+      });
+    } else if (car === 'usps') {
+      and.push({
+        OR: [
+          { shippingCarrier: { contains: 'USPS', mode: 'insensitive' } },
+          { selectedRateProvider: { contains: 'USPS', mode: 'insensitive' } },
+        ],
+      });
+    }
+    const shipSt = shipStatus && String(shipStatus).trim();
+    if (shipSt === 'Label created') {
+      and.push({
+        OR: [
+          { fulfillmentStatus: 'LABEL_GENERATED' },
+          {
+            AND: [
+              { shippingLabelUrl: { not: null } },
+              { fulfillmentStatus: 'PICKUP_READY' },
+              { outboundShippedAt: null },
+            ],
+          },
+        ],
+      });
+    } else if (shipSt === 'Shipped') {
+      and.push({ fulfillmentStatus: 'SHIPPED' });
+    } else if (shipSt === 'In transit') {
+      and.push({ fulfillmentStatus: 'IN_TRANSIT' });
+    } else if (shipSt === 'Out for delivery') {
+      and.push({ fulfillmentStatus: 'OUT_FOR_DELIVERY' });
+    } else if (shipSt === 'Delivered') {
+      and.push({
+        OR: [{ fulfillmentStatus: 'DELIVERED' }, { status: 'DELIVERED' }, { deliveredAt: { not: null } }],
+      });
+    } else if (shipSt === 'Exception') {
+      and.push({
+        OR: [
+          { trackingStatus: { contains: 'Exception', mode: 'insensitive' } },
+          { trackingStatus: { contains: 'exception', mode: 'insensitive' } },
+          { trackingStatusDetails: { contains: 'exception', mode: 'insensitive' } },
+        ],
+      });
     }
     if (cancellationReviewStatus && String(cancellationReviewStatus).trim()) {
       and.push({ cancellationReviewStatus: String(cancellationReviewStatus).trim() });
@@ -1459,6 +1604,19 @@ export class OrderService {
     if (fs) {
       and.push({ fulfillmentStatus: fs });
     }
+    if (unassignedOnly === true || unassignedOnly === '1' || unassignedOnly === 'true') {
+      and.push({ assignedToUserId: null });
+    } else if (assignedTo && String(assignedTo).trim()) {
+      const assigneeKey = String(assignedTo).trim();
+      const assigneeUser = await prisma.user.findFirst({
+        where: {
+          OR: [{ publicId: assigneeKey }, { email: { equals: assigneeKey, mode: 'insensitive' } }],
+          portalScope: 'STAFF',
+        },
+        select: { id: true },
+      });
+      and.push({ assignedToUserId: assigneeUser?.id ?? -1 });
+    }
     const where = and.length ? { AND: and } : {};
 
     const so = sortOrder === 'asc' ? 'asc' : 'desc';
@@ -1479,6 +1637,8 @@ export class OrderService {
         include: {
           orderItems: { include: { product: true } },
           user: userForOrderList,
+          assignedTo: { select: staffAssigneeSelect },
+          assignedBy: { select: staffAssigneeSelect },
         },
         orderBy,
       }),
@@ -1511,6 +1671,8 @@ export class OrderService {
             isGuest: true,
           },
         },
+        assignedTo: { select: staffAssigneeSelect },
+        assignedBy: { select: staffAssigneeSelect },
         orderItems: {
           include: orderItemAdminInclude,
         },
@@ -1838,6 +2000,14 @@ export class OrderService {
         ? String(payload.manualShippingNotes).trim()
         : null;
     }
+    if (payload.shippingAddressJson && typeof payload.shippingAddressJson === 'object') {
+      const fs = String(order.fulfillmentStatus || '').toUpperCase();
+      const st = String(order.status || '').toUpperCase();
+      if (['SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(fs) || st === 'SHIPPED' || st === 'DELIVERED') {
+        throw new AppError(400, 'Cannot edit shipping address after the order has shipped', 'ADDRESS_LOCKED');
+      }
+      data.shippingAddressJson = payload.shippingAddressJson;
+    }
     const shouldShip = shouldManualShipFromTracking({
       status: order.status,
       trackingNumber: data.trackingNumber,
@@ -1884,14 +2054,19 @@ export class OrderService {
     if (!order.shippingAddressJson) {
       throw new AppError(400, 'Order does not have a shipping address', 'SHIPPING_ADDRESS_MISSING');
     }
+    const carrierRaw = String(payload.carrier || '').trim();
+    const providerSlug =
+      payload.providerSlug ||
+      (carrierRaw.toLowerCase() === 'usps' ? 'shippo' : undefined);
     const ratesData = await shippingService.getRates({
       shippingAddress: order.shippingAddressJson,
       parcels: payload.parcels,
       preferProviderOnly: true,
       surface: 'admin',
-      providerSlug: payload.providerSlug,
+      providerSlug,
+      carrier: carrierRaw || undefined,
     });
-    const carrierFilter = String(payload.carrier || '').trim().toLowerCase();
+    const carrierFilter = carrierRaw.toLowerCase();
     const rates = carrierFilter
       ? (ratesData.rates || []).filter((r) =>
           String(r.provider || '').toLowerCase().includes(carrierFilter)
@@ -2018,18 +2193,45 @@ export class OrderService {
     if (!order.shippingAddressJson) {
       throw new AppError(400, 'Order has no shipping address', 'SHIPPING_ADDRESS_MISSING');
     }
+    if (order.shippingLabelUrl && !payload.forceRepurchase) {
+      throw new AppError(
+        409,
+        'A shipping label already exists. Void it before purchasing a new one.',
+        'LABEL_ALREADY_EXISTS'
+      );
+    }
 
     const parcels = payload.parcels?.length ? payload.parcels : await buildParcelsForOrder(order);
     const rateId = await this.resolveRateIdForOrder(order, { ...payload, parcels });
+
+    const configuredFrom = shippingService.getConfiguredOriginAddress();
+    const fromOverride =
+      payload.fromAddress && typeof payload.fromAddress === 'object' ? payload.fromAddress : null;
+    // UI overrides (warehouse picker) often omit phone/email — keep configured contact fields.
+    const fromAddress = fromOverride
+      ? {
+          ...configuredFrom,
+          ...fromOverride,
+          phone: fromOverride.phone || configuredFrom.phone,
+          email: fromOverride.email || configuredFrom.email,
+        }
+      : configuredFrom;
 
     const labelPayload = {
       ...payload,
       rateId,
       shippingAddress: order.shippingAddressJson,
-      fromAddress: shippingService.getConfiguredOriginAddress(),
+      fromAddress,
       parcels,
     };
     const label = await shippingService.generateLabel(labelPayload);
+    if (!label?.trackingNumber && !label?.shippingLabelUrl) {
+      throw new AppError(
+        502,
+        'Carrier did not return a tracking number or label file. Nothing was saved.',
+        'SHIP_LABEL_EMPTY'
+      );
+    }
 
     const packageDetailsJson = {
       parcels,
@@ -2210,6 +2412,156 @@ export class OrderService {
         shippingCarrier: updated.shippingCarrier,
         statusChanged: shouldShip,
         fulfillmentSynced: shouldShip,
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Void an unused outbound label (pre-ship only). Clears label/tracking and
+   * returns fulfillment to PICKUP_READY so a new label can be purchased.
+   */
+  async voidAdminShippingLabel(orderPublicId, actor) {
+    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    if (!order) throw new AppError(404, 'Order not found');
+
+    const fs = String(order.fulfillmentStatus || '').toUpperCase();
+    const st = String(order.status || '').toUpperCase();
+    if (['SHIPPED', 'DELIVERED', 'CANCELLED', 'RETURNED', 'REFUNDED'].includes(st)) {
+      throw new AppError(400, `Cannot void label while order is ${st.toLowerCase()}`, 'VOID_LABEL_NOT_ALLOWED');
+    }
+    if (['SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(fs)) {
+      throw new AppError(400, 'Cannot void label after the package has shipped', 'VOID_LABEL_NOT_ALLOWED');
+    }
+    if (!order.shippingLabelUrl && !order.trackingNumber) {
+      throw new AppError(400, 'No shipping label to void', 'VOID_LABEL_MISSING');
+    }
+
+    const previous = {
+      trackingNumber: order.trackingNumber,
+      shippingCarrier: order.shippingCarrier,
+      shippingLabelUrl: order.shippingLabelUrl,
+      fulfillmentStatus: order.fulfillmentStatus,
+    };
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        trackingNumber: null,
+        shippingCarrier: null,
+        shippingLabelUrl: null,
+        shippingTransactionId: null,
+        shippingShipmentId: null,
+        selectedRateId: null,
+        selectedRateProvider: null,
+        selectedRateServiceLevel: null,
+        selectedRateServiceToken: null,
+        selectedRateAmount: null,
+        selectedRateCurrency: null,
+        labelGeneratedAt: null,
+        trackingStatus: null,
+        trackingStatusDetails: null,
+        trackingStatusDate: null,
+        trackingEta: null,
+        trackingHistoryJson: [],
+        packageDetailsJson: null,
+        fulfillmentStatus: 'PICKUP_READY',
+        pickupReadyAt: order.pickupReadyAt || new Date(),
+      },
+      include: { orderItems: { include: { product: true } }, user: userForOrderList },
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'ORDER_LABEL_VOIDED',
+      entityType: 'Order',
+      entityId: orderPublicId,
+      meta: previous,
+    });
+    return updated;
+  }
+
+  /** Pull latest carrier tracking for one order and sync fulfillment when possible. */
+  async refreshAdminTracking(orderPublicId, actor) {
+    const order = await prisma.order.findUnique({ where: { publicId: orderPublicId } });
+    if (!order) throw new AppError(404, 'Order not found');
+    if (!order.trackingNumber) {
+      throw new AppError(400, 'Order has no tracking number', 'TRACKING_MISSING');
+    }
+
+    const t = await shippingService.trackShipment(
+      order.shippingCarrier || 'UPS',
+      order.trackingNumber
+    );
+    const statusUp = String(t.status || '').toUpperCase();
+    let fulfillment = order.fulfillmentStatus;
+    if (statusUp.includes('DELIVERED')) fulfillment = 'DELIVERED';
+    else if (statusUp.includes('OUT FOR')) fulfillment = 'OUT_FOR_DELIVERY';
+    else if (
+      statusUp.includes('TRANSIT') ||
+      statusUp.includes('DEPART') ||
+      statusUp.includes('ARRIVAL') ||
+      statusUp.includes('SCAN')
+    ) {
+      fulfillment = 'IN_TRANSIT';
+    } else if (
+      statusUp.includes('LABEL') ||
+      statusUp.includes('PRE_TRANSIT') ||
+      statusUp.includes('INFO')
+    ) {
+      if (!['SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(String(fulfillment || ''))) {
+        fulfillment = order.shippingLabelUrl ? 'LABEL_GENERATED' : fulfillment;
+      }
+    }
+
+    const statusChanged = String(t.status || '') !== String(order.trackingStatus || '');
+    if (statusChanged) {
+      await prisma.shipmentTrackingEvent.create({
+        data: {
+          orderId: order.id,
+          source: String(order.shippingCarrier || 'ups').toLowerCase(),
+          statusCode: String(t.status || '').slice(0, 120),
+          description: t.statusDetails || null,
+          raw: t.raw || t,
+          eventAt: t.statusDate ? new Date(t.statusDate) : new Date(),
+        },
+      });
+    }
+
+    const data = {
+      trackingStatus: t.status || null,
+      trackingStatusDetails: t.statusDetails || null,
+      trackingStatusDate: t.statusDate ? new Date(t.statusDate) : new Date(),
+      trackingEta: t.eta ? new Date(t.eta) : order.trackingEta,
+      trackingHistoryJson: Array.isArray(t.history) ? t.history : [],
+    };
+    if (fulfillment) data.fulfillmentStatus = fulfillment;
+    if (fulfillment === 'DELIVERED') {
+      data.status = 'DELIVERED';
+      data.deliveredAt = order.deliveredAt || new Date();
+    } else if (fulfillment === 'IN_TRANSIT' || fulfillment === 'OUT_FOR_DELIVERY') {
+      if (!order.outboundShippedAt) data.outboundShippedAt = new Date();
+      if (!['SHIPPED', 'DELIVERED'].includes(String(order.status || '').toUpperCase())) {
+        data.status = 'SHIPPED';
+      }
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data,
+      include: { orderItems: { include: { product: true } }, user: userForOrderList },
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'ORDER_TRACKING_REFRESHED',
+      entityType: 'Order',
+      entityId: orderPublicId,
+      meta: {
+        trackingStatus: updated.trackingStatus,
+        fulfillmentStatus: updated.fulfillmentStatus,
       },
     });
     return updated;
@@ -2809,8 +3161,18 @@ export class OrderService {
         ...(action === 'mark_shipped' && String(body?.shipOverrideReason || '').trim()
           ? { shipOverrideReason: String(body.shipOverrideReason).trim() }
           : {}),
+        ...(action === 'mark_shipped'
+          ? { notifyCustomer: body?.notifyCustomer !== false }
+          : {}),
       },
     });
+    if (
+      action === 'mark_shipped' &&
+      body?.notifyCustomer !== false &&
+      updated.trackingNumber
+    ) {
+      await this.sendOrderTrackingEmail(updated, updated.trackingNumber);
+    }
     return updated;
   }
 
@@ -2894,7 +3256,193 @@ export class OrderService {
     return { results };
   }
 
-  async createPickupList({ orderPublicIds, title }, actor) {
+  _pickupListDisplayCode(list) {
+    return `PL-${String(list.id).padStart(4, '0')}`;
+  }
+
+  _pickupListStatus(list) {
+    if (list.completedAt) return 'completed';
+    if (Number(list.progressPicked || 0) > 0) return 'in_progress';
+    return 'open';
+  }
+
+  _pickupListStatusLabel(status) {
+    if (status === 'completed') return 'Completed';
+    if (status === 'in_progress') return 'In progress';
+    return 'Open';
+  }
+
+  async _recountPickupListProgress(listId, tx = prisma) {
+    const lines = await tx.pickupListLine.findMany({
+      where: { pickupListId: listId },
+      include: {
+        order: {
+          include: {
+            orderItems: { where: { cancelledAt: null }, select: { quantity: true, pickedQuantity: true } },
+          },
+        },
+      },
+    });
+    let needed = 0;
+    let picked = 0;
+    for (const line of lines) {
+      for (const item of line.order?.orderItems || []) {
+        needed += Number(item.quantity || 0);
+        picked += Math.min(Number(item.pickedQuantity || 0), Number(item.quantity || 0));
+      }
+    }
+    return tx.pickupList.update({
+      where: { id: listId },
+      data: { progressNeeded: needed, progressPicked: picked },
+    });
+  }
+
+  _aggregatePickupLines(orders) {
+    /** @type {Map<string, { sku: string, name: string, loc: string, need: number, got: number, orderPublicIds: Set<string>, itemRefs: Array<{ orderPublicId: string, itemPublicId: string, quantity: number, pickedQuantity: number }> }>} */
+    const map = new Map();
+    for (const order of orders) {
+      for (const item of order.orderItems || []) {
+        if (item.cancelledAt) continue;
+        const sku = String(item.productVariant?.sku || item.product?.sku || '').trim() || `item-${item.publicId}`;
+        const name = String(item.product?.name || 'Item');
+        const loc =
+          String(item.productVariant?.warehouseLocation || item.product?.warehouseLocation || '').trim() ||
+          'Main Warehouse';
+        const key = `${sku.toLowerCase()}|${loc.toLowerCase()}`;
+        let row = map.get(key);
+        if (!row) {
+          row = {
+            sku,
+            name,
+            loc,
+            need: 0,
+            got: 0,
+            orderPublicIds: new Set(),
+            itemRefs: [],
+          };
+          map.set(key, row);
+        }
+        const qty = Number(item.quantity || 0);
+        const got = Math.min(Number(item.pickedQuantity || 0), qty);
+        row.need += qty;
+        row.got += got;
+        row.orderPublicIds.add(order.publicId);
+        row.itemRefs.push({
+          orderPublicId: order.publicId,
+          itemPublicId: item.publicId,
+          quantity: qty,
+          pickedQuantity: Number(item.pickedQuantity || 0),
+        });
+      }
+    }
+    return [...map.values()]
+      .map((r) => ({
+        sku: r.sku,
+        name: r.name,
+        loc: r.loc,
+        need: r.need,
+        got: r.got,
+        orderPublicIds: [...r.orderPublicIds],
+        itemRefs: r.itemRefs,
+        done: r.got >= r.need && r.need > 0,
+      }))
+      .sort((a, b) => a.loc.localeCompare(b.loc) || a.sku.localeCompare(b.sku));
+  }
+
+  _serializePickupListSummary(list) {
+    const status = this._pickupListStatus(list);
+    return {
+      id: list.publicId,
+      publicId: list.publicId,
+      code: this._pickupListDisplayCode(list),
+      title: list.title,
+      status,
+      statusLabel: this._pickupListStatusLabel(status),
+      progressPicked: list.progressPicked,
+      progressNeeded: list.progressNeeded,
+      orderCount: list.lines?.length ?? list._count?.lines ?? 0,
+      assignedTo: list.assignedTo || null,
+      completedAt: list.completedAt,
+      createdAt: list.createdAt,
+    };
+  }
+
+  async listPickupLists({ page = 1, limit = 10, search, statusGroup } = {}) {
+    const take = Math.min(Math.max(Number(limit) || 10, 1), 100);
+    const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
+    const and = [];
+    const sg = statusGroup && String(statusGroup).trim();
+    if (sg === 'completed') {
+      and.push({ completedAt: { not: null } });
+    } else if (sg === 'open') {
+      and.push({ completedAt: null, progressPicked: 0 });
+    } else if (sg === 'in_progress') {
+      and.push({ completedAt: null, progressPicked: { gt: 0 } });
+    }
+    if (search && String(search).trim()) {
+      const q = String(search).trim();
+      and.push({
+        OR: [
+          { publicId: { contains: q, mode: 'insensitive' } },
+          { title: { contains: q, mode: 'insensitive' } },
+          { assignedTo: { email: { contains: q, mode: 'insensitive' } } },
+          { assignedTo: { firstName: { contains: q, mode: 'insensitive' } } },
+          { assignedTo: { lastName: { contains: q, mode: 'insensitive' } } },
+          {
+            lines: {
+              some: {
+                order: {
+                  OR: [
+                    { publicId: { contains: q, mode: 'insensitive' } },
+                    { orderNumber: { contains: q, mode: 'insensitive' } },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      });
+    }
+    const where = and.length ? { AND: and } : {};
+    const [rows, total] = await Promise.all([
+      prisma.pickupList.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          assignedTo: { select: staffAssigneeSelect },
+          _count: { select: { lines: true } },
+        },
+      }),
+      prisma.pickupList.count({ where }),
+    ]);
+    return {
+      lists: rows.map((r) => this._serializePickupListSummary({ ...r, lines: { length: r._count.lines } })),
+      pagination: {
+        total,
+        page: Math.max(Number(page) || 1, 1),
+        limit: take,
+        pages: Math.ceil(total / take) || 1,
+      },
+    };
+  }
+
+  async createPickupList({ orderPublicIds, title, assigneePublicId }, actor) {
+    const assigneeKey = String(assigneePublicId || actor?.id || '').trim();
+    const assignee = await prisma.user.findFirst({
+      where: {
+        publicId: assigneeKey,
+        portalScope: 'STAFF',
+        isActive: true,
+        role: { name: { in: ['ADMIN', 'ADMIN_TEAM'] } },
+      },
+      select: { id: true, ...staffAssigneeSelect },
+    });
+    if (!assignee) {
+      throw new AppError(400, 'Choose a team member.', 'ASSIGNEE_REQUIRED');
+    }
+
     const orders = await prisma.order.findMany({
       where: { publicId: { in: orderPublicIds } },
       include: {
@@ -2946,28 +3494,199 @@ export class OrderService {
       );
     }
 
-    // Preserve caller order for eligible ids only.
-    const byId = new Map(eligible.map((o) => [o.publicId, o]));
-    const ordered = orderPublicIds.map((id) => byId.get(id)).filter(Boolean);
-
-    const list = await prisma.pickupList.create({
-      data: {
-        title: title || `Pickup ${new Date().toISOString().slice(0, 10)}`,
-        lines: {
-          create: ordered.map((o, i) => ({ orderId: o.id, sortOrder: i })),
-        },
+    const openMembership = await prisma.pickupListLine.findMany({
+      where: {
+        orderId: { in: eligible.map((o) => o.id) },
+        pickupList: { completedAt: null },
       },
-      include: { lines: { include: { order: true } } },
+      select: { orderId: true },
     });
+    const onOpen = new Set(openMembership.map((r) => r.orderId));
+    const free = [];
+    for (const o of eligible) {
+      if (onOpen.has(o.id)) {
+        skipped.push({ id: o.publicId, reason: 'already on an open pickup list' });
+        continue;
+      }
+      free.push(o);
+    }
+    if (!free.length) {
+      throw new AppError(
+        400,
+        'No orders to add. Only orders that are New or In process, and not already on an open pickup list, can be added.'
+      );
+    }
+
+    const byId = new Map(free.map((o) => [o.publicId, o]));
+    const ordered = orderPublicIds.map((id) => byId.get(id)).filter(Boolean);
+    const actorUserId = await resolveActorUserId(actor);
+
+    let needed = 0;
+    let picked = 0;
+    for (const o of ordered) {
+      for (const item of o.orderItems || []) {
+        if (item.cancelledAt) continue;
+        needed += Number(item.quantity || 0);
+        picked += Math.min(Number(item.pickedQuantity || 0), Number(item.quantity || 0));
+      }
+    }
+
+    const list = await prisma.$transaction(async (tx) => {
+      const created = await tx.pickupList.create({
+        data: {
+          title: title || `Pickup ${new Date().toISOString().slice(0, 10)}`,
+          assignedToUserId: assignee.id,
+          assignedAt: new Date(),
+          assignedByUserId: actorUserId,
+          progressNeeded: needed,
+          progressPicked: picked,
+          lines: {
+            create: ordered.map((o, i) => ({ orderId: o.id, sortOrder: i })),
+          },
+        },
+        include: {
+          lines: { include: { order: true } },
+          assignedTo: { select: staffAssigneeSelect },
+        },
+      });
+
+      for (const o of ordered) {
+        const data = {};
+        if (!o.assignedToUserId) {
+          data.assignedToUserId = assignee.id;
+          data.assignedAt = new Date();
+          data.assignedByUserId = actorUserId;
+        }
+        if (o.fulfillmentStatus === 'NEW_ORDER' || !o.fulfillmentStatus) {
+          data.fulfillmentStatus = 'ACCEPTED';
+          if (!o.fulfillmentAcceptedAt) data.fulfillmentAcceptedAt = new Date();
+        }
+        if (Object.keys(data).length) {
+          await tx.order.update({ where: { id: o.id }, data });
+        }
+      }
+      return created;
+    });
+
     await writeAdminAudit({
       actorId: actor?.id,
       actorEmail: actor?.email,
       action: 'PICKUP_LIST_CREATED',
       entityType: 'PickupList',
       entityId: list.publicId,
-      meta: { count: ordered.length, skipped },
+      meta: {
+        count: ordered.length,
+        skipped,
+        code: this._pickupListDisplayCode(list),
+        assigneePublicId: assignee.publicId,
+      },
     });
-    return { ...list, skipped };
+    return { ...this._serializePickupListSummary(list), skipped, lines: list.lines };
+  }
+
+  async getPickupListDetail(publicId) {
+    let list = await prisma.pickupList.findUnique({
+      where: { publicId },
+      include: {
+        assignedTo: { select: staffAssigneeSelect },
+        assignedBy: { select: staffAssigneeSelect },
+        lines: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            order: {
+              include: {
+                user: { select: { email: true, firstName: true, lastName: true, phone: true } },
+                assignedTo: { select: staffAssigneeSelect },
+                orderItems: {
+                  include: {
+                    product: {
+                      select: {
+                        publicId: true,
+                        name: true,
+                        sku: true,
+                        warehouseLocation: true,
+                      },
+                    },
+                    productVariant: {
+                      select: { publicId: true, sku: true, warehouseLocation: true, combination: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!list) throw new AppError(404, 'Pickup list not found');
+    // Backfill progress for lists created before denormalized counters existed.
+    if (list.lines.length > 0 && Number(list.progressNeeded || 0) === 0 && !list.completedAt) {
+      await this._recountPickupListProgress(list.id);
+      list = await prisma.pickupList.findUnique({
+        where: { publicId },
+        include: {
+          assignedTo: { select: staffAssigneeSelect },
+          assignedBy: { select: staffAssigneeSelect },
+          lines: {
+            orderBy: { sortOrder: 'asc' },
+            include: {
+              order: {
+                include: {
+                  user: { select: { email: true, firstName: true, lastName: true, phone: true } },
+                  assignedTo: { select: staffAssigneeSelect },
+                  orderItems: {
+                    include: {
+                      product: {
+                        select: {
+                          publicId: true,
+                          name: true,
+                          sku: true,
+                          warehouseLocation: true,
+                        },
+                      },
+                      productVariant: {
+                        select: {
+                          publicId: true,
+                          sku: true,
+                          warehouseLocation: true,
+                          combination: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      if (!list) throw new AppError(404, 'Pickup list not found');
+    }
+    const orders = list.lines.map((l) => l.order).filter(Boolean);
+    const aggregated = this._aggregatePickupLines(orders);
+    const status = this._pickupListStatus(list);
+    return {
+      ...this._serializePickupListSummary(list),
+      assignedBy: list.assignedBy || null,
+      aggregatedLines: aggregated,
+      orders: orders.map((o) => ({
+        id: o.publicId,
+        publicId: o.publicId,
+        orderNumber: o.orderNumber,
+        status: o.status,
+        paymentStatus: o.paymentStatus,
+        fulfillmentStatus: o.fulfillmentStatus,
+        assignedTo: o.assignedTo || null,
+        user: o.user,
+        picked: (o.orderItems || [])
+          .filter((i) => !i.cancelledAt)
+          .reduce((s, i) => s + Math.min(Number(i.pickedQuantity || 0), Number(i.quantity || 0)), 0),
+        needed: (o.orderItems || [])
+          .filter((i) => !i.cancelledAt)
+          .reduce((s, i) => s + Number(i.quantity || 0), 0),
+      })),
+      canComplete: status !== 'completed' && aggregated.length > 0 && aggregated.every((l) => l.done),
+    };
   }
 
   async getPickupListForPdf(publicId) {
@@ -2989,9 +3708,123 @@ export class OrderService {
     });
     if (!list) throw new AppError(404, 'Pickup list not found');
     return {
-      title: list.title,
+      title: list.title || this._pickupListDisplayCode(list),
+      code: this._pickupListDisplayCode(list),
       orders: list.lines.map((l) => l.order),
     };
+  }
+
+  /**
+   * Scan / type SKU against an open pickup list — increments first incomplete matching line item.
+   */
+  async scanPickupListSku(publicId, { sku, quantity = 1 }, actor) {
+    const detail = await this.getPickupListDetail(publicId);
+    if (detail.status === 'completed') {
+      throw new AppError(400, 'This pickup list is already completed.');
+    }
+    const needle = String(sku || '').trim().toLowerCase();
+    if (!needle) throw new AppError(400, 'Scan a barcode or type a SKU first.');
+
+    const line = detail.aggregatedLines.find(
+      (l) => l.sku.toLowerCase() === needle && !l.done
+    );
+    if (!line) {
+      const any = detail.aggregatedLines.find((l) => l.sku.toLowerCase() === needle);
+      if (any?.done) {
+        throw new AppError(400, 'Every unit of this SKU is already picked.');
+      }
+      throw new AppError(400, `${sku} is not in this pickup list.`);
+    }
+
+    let remaining = Math.max(1, Number(quantity) || 1);
+    for (const ref of line.itemRefs) {
+      if (remaining <= 0) break;
+      const room = Math.max(0, ref.quantity - ref.pickedQuantity);
+      if (room <= 0) continue;
+      const add = Math.min(room, remaining);
+      await this.pickOrderItem(
+        ref.orderPublicId,
+        ref.itemPublicId,
+        { pickedQuantity: ref.pickedQuantity + add },
+        actor
+      );
+      remaining -= add;
+    }
+
+    const listRow = await prisma.pickupList.findUnique({ where: { publicId }, select: { id: true } });
+    if (listRow) await this._recountPickupListProgress(listRow.id);
+
+    const refreshed = await this.getPickupListDetail(publicId);
+    return {
+      message: `${line.sku} picked.`,
+      list: refreshed,
+    };
+  }
+
+  async pickAllOnPickupListLine(publicId, { sku, loc }, actor) {
+    const detail = await this.getPickupListDetail(publicId);
+    if (detail.status === 'completed') {
+      throw new AppError(400, 'This pickup list is already completed.');
+    }
+    const line = detail.aggregatedLines.find(
+      (l) =>
+        l.sku === sku &&
+        (!loc || l.loc === loc)
+    );
+    if (!line) throw new AppError(404, 'Line not found on this pickup list.');
+    for (const ref of line.itemRefs) {
+      if (ref.pickedQuantity >= ref.quantity) continue;
+      await this.pickOrderItem(
+        ref.orderPublicId,
+        ref.itemPublicId,
+        { pickedQuantity: ref.quantity },
+        actor
+      );
+    }
+    const listRow = await prisma.pickupList.findUnique({ where: { publicId }, select: { id: true } });
+    if (listRow) await this._recountPickupListProgress(listRow.id);
+    return this.getPickupListDetail(publicId);
+  }
+
+  async completePickupList(publicId, actor) {
+    const detail = await this.getPickupListDetail(publicId);
+    if (detail.status === 'completed') {
+      throw new AppError(400, 'Pickup list already completed.');
+    }
+    if (!detail.canComplete) {
+      throw new AppError(400, 'Pick every item first.');
+    }
+
+    const list = await prisma.pickupList.findUnique({ where: { publicId } });
+    if (!list) throw new AppError(404, 'Pickup list not found');
+
+    for (const o of detail.orders) {
+      const fs = String(o.fulfillmentStatus || '');
+      if (['NEW_ORDER', 'ACCEPTED', ''].includes(fs)) {
+        try {
+          await this.patchOrderFulfillment(o.publicId, { action: 'pickup_ready' }, actor);
+        } catch {
+          /* may already be ready via auto-pick */
+        }
+      }
+    }
+
+    const updated = await prisma.pickupList.update({
+      where: { id: list.id },
+      data: { completedAt: new Date() },
+      include: { assignedTo: { select: staffAssigneeSelect } },
+    });
+
+    await writeAdminAudit({
+      actorId: actor?.id,
+      actorEmail: actor?.email,
+      action: 'PICKUP_LIST_COMPLETED',
+      entityType: 'PickupList',
+      entityId: publicId,
+      meta: { code: this._pickupListDisplayCode(updated), orderCount: detail.orderCount },
+    });
+
+    return this.getPickupListDetail(publicId);
   }
 
   async getOrderPdfBuffer(orderPublicId, kind) {

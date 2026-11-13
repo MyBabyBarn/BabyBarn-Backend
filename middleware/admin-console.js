@@ -105,3 +105,35 @@ export function requireTeamAction(teamModule, actionId) {
     }
   };
 }
+
+/**
+ * ADMIN bypasses. ADMIN_TEAM must hold every listed module/action pair.
+ * @param {Array<[string, string]>} pairs
+ */
+export function requireAllTeamActions(pairs) {
+  return (req, res, next) => {
+    try {
+      if (!req.user) {
+        next(new AppError(403, 'Forbidden'));
+        return;
+      }
+      if (req.user.role === 'ADMIN') {
+        next();
+        return;
+      }
+      if (req.user.role !== 'ADMIN_TEAM') {
+        next(new AppError(403, 'Forbidden'));
+        return;
+      }
+      for (const [teamModule, actionId] of pairs) {
+        if (!hasTeamAction(req.user.adminModules, teamModule, actionId)) {
+          next(new AppError(403, 'Forbidden', 'MISSING_TEAM_ACTION'));
+          return;
+        }
+      }
+      next();
+    } catch (e) {
+      next(e);
+    }
+  };
+}

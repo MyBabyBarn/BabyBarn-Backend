@@ -801,6 +801,11 @@ export class ReturnsService {
       type: 'STANDARD',
       statuses: ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION'],
     });
+    // Open tabs (prototype parity): exclude terminal closed statuses.
+    const standardOpenWhere = buildAdminReturnListWhere({
+      type: 'STANDARD',
+      statuses: ['REQUESTED', 'RECEIVED', 'UNDER_INSPECTION', 'APPROVED'],
+    });
     const refurbWhere = buildAdminReturnListWhere({ type: 'REFURBISHMENT' });
     const adminVisibleWhere = buildAdminReturnListWhere({
       type: 'REFURBISHMENT',
@@ -815,16 +820,22 @@ export class ReturnsService {
 
     const [
       pendingStandardGroups,
+      standardOpenGroups,
       refurbGroups,
       adminVisibleGroups,
       eligibilityGroups,
       awaitingGroups,
       transitGroups,
       physicalGroups,
+      toInspectGroups,
+      arrivingGroups,
+      openJobCount,
       packageRequested,
+      packageOpen,
       inspectionToday,
     ] = await Promise.all([
       prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: pendingStandardWhere }),
+      prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: standardOpenWhere }),
       prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: refurbWhere }),
       prisma.returnRequest.groupBy({ by: ['submissionPublicId'], where: adminVisibleWhere }),
       prisma.returnRequest.groupBy({
@@ -859,20 +870,54 @@ export class ReturnsService {
           status: 'UNDER_INSPECTION',
         }),
       }),
+      // Prototype “To inspect”: std + refurb received / under inspection
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: buildAdminReturnListWhere({
+          statuses: ['RECEIVED', 'UNDER_INSPECTION'],
+        }),
+      }),
+      // Prototype “Arriving”: packages not yet fully in — exclude standard APPROVED (post-inspect)
+      prisma.returnRequest.groupBy({
+        by: ['submissionPublicId'],
+        where: {
+          OR: [
+            buildAdminReturnListWhere({
+              type: 'STANDARD',
+              statuses: ['REQUESTED', 'IN_TRANSIT'],
+            }),
+            buildAdminReturnListWhere({
+              type: 'REFURBISHMENT',
+              statuses: ['REQUESTED', 'APPROVED', 'LABEL_GENERATED', 'IN_TRANSIT'],
+            }),
+          ],
+        },
+      }),
+      prisma.refurbishmentJob.count({
+        where: { status: { notIn: ['LISTED', 'CANCELLED'] } },
+      }),
       prisma.returnPackageRequest.count({ where: { status: 'REQUESTED' } }),
+      prisma.returnPackageRequest.count({
+        where: { status: { in: ['REQUESTED', 'APPROVED'] } },
+      }),
       prisma.returnRequest.count({ where: inspectionTodayWhere }),
     ]);
 
     return {
       pendingStandard: pendingStandardGroups.length,
+      standardOpen: standardOpenGroups.length,
       refurbishmentTotal: refurbGroups.length,
       packageRequested,
+      packageOpen,
       inspectionToday,
       inspectionQueues: {
         eligibility: eligibilityGroups.length,
         awaiting: awaitingGroups.length,
         transit: transitGroups.length,
         physical: physicalGroups.length,
+        toInspect: toInspectGroups.length,
+        arriving: arrivingGroups.length,
+        jobs: openJobCount,
         adminVisibleTotal: adminVisibleGroups.length,
       },
     };

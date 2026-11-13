@@ -92,8 +92,17 @@ router.get('/barcodes/:code/pdf', ...barcodeStaff, (req, res, next) =>
 router.get('/barcodes/:code/png', ...barcodeStaff, (req, res, next) =>
   inventoryController.barcodePng(req, res).catch(next)
 );
+router.post('/barcodes/printed', ...barcodeStaff, (req, res, next) =>
+  inventoryController.markBarcodesPrintedBulk(req, res).catch(next)
+);
+router.post('/barcodes/sent', ...barcodeStaff, (req, res, next) =>
+  inventoryController.markBarcodesSentBulk(req, res).catch(next)
+);
 router.post('/barcodes/:code/sent', ...barcodeStaff, (req, res, next) =>
   inventoryController.markBarcodeSent(req, res).catch(next)
+);
+router.post('/barcodes/:code/printed', ...barcodeStaff, (req, res, next) =>
+  inventoryController.markBarcodePrinted(req, res).catch(next)
 );
 router.post('/barcodes/:code/regenerate', ...barcodeStaff, (req, res, next) =>
   inventoryController.regenerateBarcode(req, res).catch(next)
@@ -175,12 +184,14 @@ router.post('/scan/sessions/:code/disconnect', ...barcodeStaff, (req, res, next)
 router.get('/scan/sessions/:code', ...barcodeStaff, (req, res, next) =>
   inventoryController.getScanSession(req, res).catch(next)
 );
-/** QR requires staff auth + pairingToken (never public by session code alone). */
-router.get('/scan/sessions/:code/qr', ...barcodeStaff, (req, res, next) =>
+/**
+ * QR + SSE authenticate with short-lived pairingToken only (EventSource / <img>
+ * cannot send Bearer JWTs). Never public by session code alone.
+ */
+router.get('/scan/sessions/:code/qr', (req, res, next) =>
   inventoryController.scanSessionQr(req, res).catch(next)
 );
-/** SSE auth via short-lived pairingToken query — not the long-lived access JWT. */
-router.get('/scan/sessions/:code/events', ...barcodeStaff, (req, res, next) =>
+router.get('/scan/sessions/:code/events', (req, res, next) =>
   inventoryController.scanSessionEvents(req, res).catch(next)
 );
 router.post('/scan/relay', ...barcodeStaff, (req, res, next) =>
@@ -193,6 +204,12 @@ router.post('/scan/pair/:code/join', (req, res, next) =>
 );
 router.get('/scan/pair/:code', (req, res, next) =>
   inventoryController.pairGetScanSession(req, res).catch(next)
+);
+router.get('/scan/pair/:code/qr', (req, res, next) =>
+  inventoryController.scanSessionQr(req, res).catch(next)
+);
+router.get('/scan/pair/:code/events', (req, res, next) =>
+  inventoryController.scanSessionEvents(req, res).catch(next)
 );
 router.post('/scan/pair/relay', (req, res, next) =>
   inventoryController.pairScanRelay(req, res).catch(next)
