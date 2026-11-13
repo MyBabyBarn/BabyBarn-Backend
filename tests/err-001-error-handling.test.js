@@ -1,14 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '../..');
+const backendRoot = join(__dirname, '..');
+const monoRoot = join(__dirname, '../..');
+const isMonorepo = existsSync(join(monoRoot, 'admin-fe'));
+const root = isMonorepo ? monoRoot : backendRoot;
 
 function read(rel) {
-  return readFileSync(join(root, rel), 'utf8');
+  const path =
+    !isMonorepo && rel.startsWith('backend/') ? rel.slice('backend/'.length) : rel;
+  return readFileSync(join(root, path), 'utf8');
+}
+
+function hasSibling(name) {
+  return isMonorepo && existsSync(join(monoRoot, name));
 }
 
 /** Mirrors admin-fe/lib/classify-financial-api-error.ts for regression. */
@@ -134,7 +143,7 @@ test('ERR-001: non-retryable conflict/permission', () => {
   assert.equal(conflict.kind, 'non_retryable');
 });
 
-test('ERR-001: FE wires financial classifier on refund/settle/cancel', () => {
+test('ERR-001: FE wires financial classifier on refund/settle/cancel', { skip: !hasSibling('admin-fe') }, () => {
   const detail = read('admin-fe/components/admin/returns/standard/StandardReturnDetailView.tsx');
   const order = read('admin-fe/app/(private)/admin/(console)/orders/[id]/page.tsx');
   assert.ok(detail.includes('classifyFinancialApiError'));
@@ -142,7 +151,7 @@ test('ERR-001: FE wires financial classifier on refund/settle/cancel', () => {
   assert.ok(order.includes('useSubmitLock'));
 });
 
-test('ERR-001: list pages gate empty tables behind loadError + Retry', () => {
+test('ERR-001: list pages gate empty tables behind loadError + Retry', { skip: !hasSibling('admin-fe') }, () => {
   const orders = read('admin-fe/app/(private)/admin/(console)/orders/page.tsx');
   const returns = read('admin-fe/app/(private)/admin/(console)/returns/page.tsx');
   const inspection = read('admin-fe/app/(private)/admin/(console)/inspection/page.tsx');
@@ -152,7 +161,7 @@ test('ERR-001: list pages gate empty tables behind loadError + Retry', () => {
   assert.ok(inspection.includes('Queue could not be loaded'));
 });
 
-test('ERR-001: customer extractApiError + returns Retry', () => {
+test('ERR-001: customer extractApiError + returns Retry', { skip: !hasSibling('customer-fe') }, () => {
   const helper = read('customer-fe/lib/extract-api-error.ts');
   const page = read('customer-fe/app/(private)/dashboard/returns/page.tsx');
   assert.ok(helper.includes('extractApiError'));
@@ -167,12 +176,11 @@ test('ERR-001: job-lease records failure and logs release errors', () => {
   assert.equal(/release\(\{[\s\S]*?\}\)\.catch\(\(\) => \{\}\)/.test(lease), false);
 });
 
-test('ERR-001: inventory adjust + history no longer silent', () => {
+test('ERR-001: inventory adjust + history no longer silent', { skip: !hasSibling('admin-fe') }, () => {
   const modal = read('admin-fe/components/inventory/InventoryAdjustModal.tsx');
-  const consoleSrc = read('admin-fe/components/admin/inventory/AdminInventoryConsole.tsx');
+  const ledger = read('admin-fe/components/admin/inventory/AdminInventoryLedgerConsole.tsx');
   assert.ok(modal.includes('extractApiError'));
-  assert.ok(consoleSrc.includes('histError'));
-  assert.ok(consoleSrc.includes('Could not load inventory history'));
+  assert.ok(ledger.includes('Could not load inventory ledger'));
 });
 
 test('ERR-001: financial domain codes unchanged in services', () => {
