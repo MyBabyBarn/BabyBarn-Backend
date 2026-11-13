@@ -69,10 +69,33 @@ git_sync_readonly() {
   log "Now at $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
 }
 
+ensure_swap() {
+  # Small EC2 boxes often OOM-kill `npm ci` / Next builds without swap.
+  if swapon --show 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if [[ -f /swapfile ]]; then
+    log "Enabling existing /swapfile"
+    sudo swapon /swapfile || true
+    return 0
+  fi
+  log "Creating 2G swapfile (npm ci / next build need headroom)"
+  sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  if ! grep -q '/swapfile' /etc/fstab 2>/dev/null; then
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  fi
+}
+
 install_dependencies() {
   cd "${DEPLOY_ROOT}"
+  ensure_swap
+  log "Free memory before npm ci"
+  free -h || true
   log "npm ci"
-  npm ci
+  npm ci --no-audit --no-fund
 }
 
 build_app() {
