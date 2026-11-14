@@ -1,7 +1,18 @@
 import { productService } from '../services/product.service.js';
 import { categoryService } from '../services/category.service.js';
+import {
+  assignProductsToCategory,
+  previewAssignConflicts,
+  removeProductFromCategory,
+} from '../services/product-category.service.js';
 import { validate } from '../utils/validation.js';
-import { createProductSchema, updateProductSchema, refurbFromSourceSchema, refurbStandaloneCreateSchema } from '../schemas/index.js';
+import {
+  createProductSchema,
+  updateProductSchema,
+  refurbFromSourceSchema,
+  refurbStandaloneCreateSchema,
+  generateVariantSkusSchema,
+} from '../schemas/index.js';
 import { toPublicJson } from '../utils/serialize.js';
 
 /** Parse comma-separated query values (multi-select filters). */
@@ -97,6 +108,9 @@ export class ProductController {
     const missingImage = req.query.missingImage ? String(req.query.missingImage) : undefined;
     const refurbSource = req.query.refurbSource ? String(req.query.refurbSource) : undefined;
     const conditionGrade = req.query.conditionGrade ? String(req.query.conditionGrade) : undefined;
+    const excludeCategoryId = req.query.excludeCategoryId
+      ? String(req.query.excludeCategoryId)
+      : undefined;
 
     const listFilters = {
       search,
@@ -106,6 +120,7 @@ export class ProductController {
       missingImage,
       refurbSource,
       conditionGrade,
+      excludeCategoryId,
       productType:
         productType === 'NEW' || productType === 'REFURBISHED' || productType === 'all'
           ? productType
@@ -170,6 +185,63 @@ export class ProductController {
       message: 'Product updated successfully',
       data: toPublicJson(product),
     });
+  }
+
+  async assignToCategory(req, res) {
+    const { productIds, categoryId, mode } = req.body || {};
+    const data = await assignProductsToCategory({
+      productPublicIds: productIds,
+      categoryPublicId: categoryId,
+      mode: mode === 'keepBoth' ? 'keepBoth' : 'move',
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async previewCategoryAssign(req, res) {
+    const { productIds, categoryId } = req.body || {};
+    const data = await previewAssignConflicts({
+      productPublicIds: productIds,
+      categoryPublicId: categoryId,
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async removeFromCategory(req, res) {
+    const { id } = req.params;
+    const categoryId = req.body?.categoryId || req.query.categoryId;
+    const data = await removeProductFromCategory({
+      productPublicId: id,
+      categoryPublicId: String(categoryId || ''),
+    });
+    res.status(200).json({ success: true, data: toPublicJson(data) });
+  }
+
+  async restoreProduct(req, res) {
+    const { id } = req.params;
+    const product = await productService.restoreProduct(id);
+    res.status(200).json({ success: true, data: toPublicJson(product) });
+  }
+
+  async generateVariantSkus(req, res) {
+    const { id } = req.params;
+    const body = await validate(generateVariantSkusSchema, req.body);
+    const { product, barcodesCreated } = await productService.generateVariantSkus(id, body);
+    res.status(200).json({
+      success: true,
+      message: 'Variant SKUs generated',
+      data: toPublicJson({
+        product,
+        variants: product.variants,
+        barcodesCreated,
+      }),
+    });
+  }
+
+  async setVariantActive(req, res) {
+    const { id, variantId } = req.params;
+    const isActive = Boolean(req.body?.isActive);
+    const variant = await productService.setVariantActive(id, variantId, isActive);
+    res.status(200).json({ success: true, data: toPublicJson(variant) });
   }
 
   async deleteProduct(req, res) {

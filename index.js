@@ -65,6 +65,10 @@ app.use(
     },
   })
 );
+/** Missing files under /uploads must not fall through as API "Route not found". */
+app.use('/uploads', (req, res) => {
+  res.status(404).type('text/plain').send('Not found');
+});
 
 if (config.trustProxy) {
   app.set('trust proxy', 1);

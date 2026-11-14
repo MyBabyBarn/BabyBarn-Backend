@@ -13,7 +13,7 @@ export class ProductUploadController {
 
   /**
    * POST multipart field name: `image` (single file).
-   * Returns absolute public URL for use in `imageUrl` / `gallery`.
+   * Returns a relative `/uploads/...` path for `imageUrl` / `gallery`.
    */
   uploadProductImage(req, res) {
     const file = req.file;
@@ -26,11 +26,10 @@ export class ProductUploadController {
     verifyUploadedImage(file);
 
     const relative = `/uploads/products/${file.filename}`;
-    const url = `${this.resolvePublicBaseUrl(req)}${relative}`;
 
     res.status(201).json({
       success: true,
-      data: { url, path: relative },
+      data: { url: relative, path: relative },
     });
   }
 }

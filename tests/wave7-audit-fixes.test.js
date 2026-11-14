@@ -12,7 +12,8 @@ test('SCL-03: product search prefers prefix and gates description scans', () => 
   assert.equal(buildProductSearchOr(''), null);
   assert.equal(buildProductSearchOr('  '), null);
   const short = buildProductSearchOr('a');
-  assert.deepEqual(short, [{ sku: { equals: 'a', mode: 'insensitive' } }]);
+  assert.ok(short?.some((c) => c.sku?.equals === 'a'));
+  assert.ok(short?.some((c) => c.variants?.some?.sku?.equals === 'a'));
 
   const mid = buildProductSearchOr('tee');
   assert.ok(mid.some((c) => c.name?.startsWith));

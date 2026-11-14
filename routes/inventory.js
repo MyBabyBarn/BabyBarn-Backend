@@ -22,6 +22,14 @@ router.get(
 );
 
 router.get(
+  '/overview',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('inventory'),
+  (req, res, next) => inventoryController.listOverview(req, res).catch(next)
+);
+
+router.get(
   '/history',
   authenticate,
   authorize('ADMIN', 'ADMIN_TEAM'),

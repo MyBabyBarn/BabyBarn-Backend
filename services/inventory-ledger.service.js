@@ -259,6 +259,18 @@ export async function listLedgerHistory({
         { product: { name: { contains: q, mode: 'insensitive' } } },
         { product: { sku: { contains: q, mode: 'insensitive' } } },
         { productVariant: { sku: { contains: q, mode: 'insensitive' } } },
+        {
+          product: {
+            barcodes: {
+              some: {
+                OR: [
+                  { code: { contains: q, mode: 'insensitive' } },
+                  { aliases: { some: { code: { contains: q, mode: 'insensitive' } } } },
+                ],
+              },
+            },
+          },
+        },
         { note: { contains: q, mode: 'insensitive' } },
         { referenceId: { contains: q, mode: 'insensitive' } },
       ],
@@ -345,6 +357,7 @@ export async function listLedgerHistory({
             imageUrl: true,
             warehouseLocation: true,
             stock: true,
+            productType: true,
           },
         },
         productVariant: {
@@ -448,54 +461,46 @@ export async function listLedgerHistory({
 
   const { combinationLabel } = await import('./inventory.service.js');
 
-  /** Stock-after: current on-hand − sum of later deltas for same product/variant. */
+  /** Stock-after: current on-hand − sum of later deltas for same product/variant (single batched read). */
   const stockKey = (productId, variantId) => `${productId}:${variantId ?? 'p'}`;
-  const keysNeeded = new Map();
-  for (const r of rows) {
-    const key = stockKey(r.productId, r.productVariantId);
-    if (!keysNeeded.has(key)) {
-      keysNeeded.set(key, {
-        productId: r.productId,
-        productVariantId: r.productVariantId,
-        current: r.productVariant ? r.productVariant.stock : r.product.stock,
-        oldestAt: r.createdAt,
-        oldestId: r.id,
-      });
-    } else {
-      const cur = keysNeeded.get(key);
-      if (
-        r.createdAt < cur.oldestAt ||
-        (r.createdAt.getTime() === cur.oldestAt.getTime() && r.id < cur.oldestId)
-      ) {
-        cur.oldestAt = r.createdAt;
-        cur.oldestId = r.id;
-      }
-    }
+  const productIdsOnPage = [...new Set(rows.map((r) => r.productId))];
+  const ledgerEvents =
+    productIdsOnPage.length > 0
+      ? await prisma.inventoryLedgerEvent.findMany({
+          where: { productId: { in: productIdsOnPage } },
+          select: {
+            id: true,
+            productId: true,
+            productVariantId: true,
+            quantityDelta: true,
+            createdAt: true,
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        })
+      : [];
+
+  const eventsByKey = new Map();
+  for (const ev of ledgerEvents) {
+    const key = stockKey(ev.productId, ev.productVariantId);
+    if (!eventsByKey.has(key)) eventsByKey.set(key, []);
+    eventsByKey.get(key).push(ev);
   }
 
-  /** @type {Map<string, number>} */
+  const isAfter = (a, b) =>
+    a.createdAt > b.createdAt ||
+    (a.createdAt.getTime() === b.createdAt.getTime() && a.id > b.id);
+
+  /** @type {Map<number, number>} */
   const laterDeltaByRowId = new Map();
-  await Promise.all(
-    [...keysNeeded.values()].map(async (meta) => {
-      const later = await prisma.inventoryLedgerEvent.findMany({
-        where: {
-          productId: meta.productId,
-          productVariantId: meta.productVariantId ?? null,
-          OR: [
-            { createdAt: { gt: meta.oldestAt } },
-            { AND: [{ createdAt: meta.oldestAt }, { id: { gte: meta.oldestId } }] },
-          ],
-        },
-        select: { id: true, quantityDelta: true, createdAt: true },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      });
-      let remaining = 0;
-      for (const ev of later) {
-        laterDeltaByRowId.set(ev.id, remaining);
-        remaining += Number(ev.quantityDelta || 0);
-      }
-    })
-  );
+  for (const r of rows) {
+    const key = stockKey(r.productId, r.productVariantId);
+    const series = eventsByKey.get(key) || [];
+    let laterSum = 0;
+    for (const ev of series) {
+      if (isAfter(ev, r)) laterSum += Number(ev.quantityDelta || 0);
+    }
+    laterDeltaByRowId.set(r.id, laterSum);
+  }
 
   const countByType = new Map(groupAgg.map((row) => [row.eventType, row._count._all]));
   const groupCounts = {
@@ -622,6 +627,7 @@ export async function listLedgerHistory({
           name: r.product.name,
           sku: r.product.sku,
           imageUrl: r.product.imageUrl ?? null,
+          productType: r.product.productType ?? 'NEW',
         },
         variant: r.productVariant
           ? {

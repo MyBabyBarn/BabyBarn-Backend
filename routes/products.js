@@ -118,6 +118,48 @@ router.put(
   requireConsoleModule('products'),
   (req, res, next) => productController.updateProduct(req, res).catch(next)
 );
+router.post(
+  '/assign-category',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('categories'),
+  (req, res, next) => productController.assignToCategory(req, res).catch(next)
+);
+router.post(
+  '/assign-category/preview',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('categories'),
+  (req, res, next) => productController.previewCategoryAssign(req, res).catch(next)
+);
+router.post(
+  '/:id/remove-category',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('categories'),
+  (req, res, next) => productController.removeFromCategory(req, res).catch(next)
+);
+router.post(
+  '/:id/restore',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('products'),
+  (req, res, next) => productController.restoreProduct(req, res).catch(next)
+);
+router.post(
+  '/:id/variants/generate-skus',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('products'),
+  (req, res, next) => productController.generateVariantSkus(req, res).catch(next)
+);
+router.patch(
+  '/:id/variants/:variantId/active',
+  authenticate,
+  authorize('ADMIN', 'ADMIN_TEAM'),
+  requireConsoleModule('products'),
+  (req, res, next) => productController.setVariantActive(req, res).catch(next)
+);
 router.delete(
   '/:id',
   authenticate,

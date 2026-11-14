@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma.js';
+import { attachDirectProductCounts } from '../lib/category-product-counts.js';
 import { AppError } from '../utils/error-handler.js';
 
 const MAX_CATEGORY_DEPTH = 4;
@@ -48,10 +49,10 @@ function subtreeMaxDepthFromNode(byParent, nodeId) {
 }
 
 async function loadAllRows() {
-  return prisma.category.findMany({
+  const rows = await prisma.category.findMany({
     orderBy: [{ parentId: 'asc' }, { name: 'asc' }],
-    include: { _count: { select: { products: true } } },
   });
+  return attachDirectProductCounts(rows);
 }
 
 function assertNotDescendant(rows, ancestorId, maybeDescendantId) {
@@ -208,8 +209,12 @@ export class CategoryService {
     const category = await prisma.category.findUnique({
       where: { publicId },
       include: {
-        _count: { select: { products: true } },
         children: { select: { id: true } },
+        productCategories: {
+          where: { product: { deletedAt: null } },
+          select: { id: true },
+          take: 1,
+        },
       },
     });
 
@@ -217,7 +222,7 @@ export class CategoryService {
       throw new AppError(404, 'Category not found');
     }
 
-    if (category._count.products > 0) {
+    if (category.productCategories.length > 0) {
       throw new AppError(
         400,
         'Cannot delete a category that has products. Remove or reassign products first.'

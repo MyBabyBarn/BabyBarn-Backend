@@ -74,6 +74,39 @@ export class InventoryController {
     });
   }
 
+  async listOverview(req, res) {
+    const page = parseInt(String(req.query.page), 10) || 1;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 24, 1), 100);
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const stockStatus = req.query.stockStatus ? String(req.query.stockStatus) : undefined;
+    const productType = req.query.productType ? String(req.query.productType) : undefined;
+    const location = req.query.location ? String(req.query.location) : undefined;
+    const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const priceMin = req.query.priceMin != null ? String(req.query.priceMin) : undefined;
+    const priceMax = req.query.priceMax != null ? String(req.query.priceMax) : undefined;
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+
+    const result = await inventoryService.listOverview({
+      page,
+      limit,
+      search,
+      stockStatus,
+      productType,
+      location,
+      categoryId,
+      priceMin,
+      priceMax,
+      from,
+      to,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: toPublicJson(result),
+    });
+  }
+
   async adjust(req, res) {
     const body = await validate(inventoryAdjustSchema, req.body);
     const userPublicId = req.user?.id;
