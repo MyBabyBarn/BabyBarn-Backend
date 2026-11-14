@@ -79,14 +79,14 @@ test('ORD-001 P3: mark_shipped still sets fulfillment + status + outboundShipped
   assert.match(block, /data\.status = 'SHIPPED'/);
 });
 
-test('ORD-001 P3: UPS label generation still sets PICKUP_READY, not SHIPPED', () => {
+test('ORD-001 P3: UPS label generation still sets LABEL_GENERATED, not SHIPPED', () => {
   const orderSvc = readFileSync(join(__dirname, '../services/order.service.js'), 'utf8');
   const helper = readFileSync(join(__dirname, '../lib/order-outbound-label-persist.js'), 'utf8');
   const start = orderSvc.indexOf('async generateAdminShippingLabel(');
   const end = orderSvc.indexOf('async generateAdminUpsLabel(');
   const block = orderSvc.slice(start, end);
   assert.match(block, /persistOutboundShippingLabel/);
-  assert.match(helper, /fulfillmentStatus = 'PICKUP_READY'|fulfillmentStatus:\s*'PICKUP_READY'/);
+  assert.match(helper, /fulfillmentStatus = 'LABEL_GENERATED'|fulfillmentStatus:\s*'LABEL_GENERATED'/);
   assert.doesNotMatch(block, /status:\s*'SHIPPED'/);
   assert.doesNotMatch(helper, /status:\s*'SHIPPED'/);
 });
