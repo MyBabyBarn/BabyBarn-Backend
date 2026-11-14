@@ -215,12 +215,15 @@ export const pauseAccountSchema = z.object({
 });
 
 const variantInputSchema = z.object({
+  id: z.string().min(1).optional(),
+  publicId: z.string().min(1).optional(),
   combination: z.record(z.string(), z.string()),
   sku: z.string().min(1),
   stock: z.number().int().min(0),
   priceOverride: z.number().min(0).nullable().optional(),
   memberPriceOverride: z.number().min(0).nullable().optional(),
   imageUrl: z.string().min(1).nullable().optional(),
+  isActive: z.boolean().optional(),
 });
 
 const variantAxisSchema = z.object({
@@ -304,6 +307,11 @@ export const updateProductSchema = createProductBodySchema
     validateVariantAgeValues(data.variants, ctx);
     validateVariantAxisNames(data.variantAxes, ctx);
   });
+
+export const generateVariantSkusSchema = z.object({
+  variantAxes: z.array(variantAxisSchema).min(1, 'At least one variant axis is required'),
+  preserveInactive: z.boolean().optional().default(false),
+});
 
 const checkoutAddressPayloadSchema = usAddressSchema;
 const checkoutAddressLooseSchema = usAddressSchema.partial();

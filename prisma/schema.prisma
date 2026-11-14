@@ -388,7 +388,8 @@ model Category {
   children    Category[] @relation("CategoryTree")
   isActive    Boolean    @default(true)
 
-  products Product[]
+  products         Product[]
+  productCategories ProductCategory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -396,6 +397,22 @@ model Category {
   @@unique([parentId, name])
   @@unique([parentId, slug])
   @@index([parentId])
+}
+
+/// Many-to-many product ↔ category. Product.categoryId remains the denormalized primary for storefront filters.
+model ProductCategory {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  categoryId Int
+  isPrimary  Boolean  @default(false)
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([productId, categoryId])
+  @@index([categoryId])
+  @@index([productId, isPrimary])
 }
 
 model Product {
@@ -437,6 +454,8 @@ model Product {
   tags                 String?
   isDraft              Boolean  @default(false)
   isActiveListing      Boolean  @default(true)
+  /// Soft-delete timestamp. Hard delete is avoided when order/history exists.
+  deletedAt            DateTime?
   inventoryModel       String      @default("simple")
   gallery              Json?
   productType          ProductType @default(NEW)
@@ -448,6 +467,7 @@ model Product {
   ratingBreakdown      Json?
 
   category   Category                @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  categories ProductCategory[]
   orderItems OrderItem[]
   checkoutIntentLines CheckoutIntentLine[]
   variants   ProductVariant[]
@@ -477,6 +497,7 @@ model Product {
   @@index([slug])
   @@index([publicId])
   @@index([isDraft])
+  @@index([deletedAt])
   @@index([productType])
   @@index([sourceReturnId])
   @@index([sourceProductId])
@@ -500,6 +521,8 @@ model ProductVariant {
   imageUrl      String?
   sortOrder     Int      @default(0)
   warehouseLocation String?
+  /// Soft-inactive for historical SKUs; prefer over hard delete when orders/barcodes exist.
+  isActive      Boolean  @default(true)
 
   inventoryAdjustments InventoryAdjustment[]
   inventoryLedgerEvents InventoryLedgerEvent[]

@@ -5,6 +5,14 @@ import { slugifyName } from '../utils/slug.js';
 import { config } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { buildProductSearchOr } from '../lib/product-search.js';
+import {
+  buildSkuBase,
+  cartesianProduct,
+  comboKeyFromCombination,
+  comboKeyFromValues,
+  orderVariantAxes,
+  skuSuffixFromCombo,
+} from '../lib/variant-matrix.js';
 
 async function wishlistInterestForProducts(productIds) {
   if (!productIds.length) {
@@ -44,6 +52,84 @@ import {
   reattachVariantBarcodes,
   snapshotVariantBarcodeSkus,
 } from './barcode.service.js';
+
+/** Soft-deactivate (or hard-delete unused) variants not present in the next SKU set. */
+async function deactivateOrRemoveUnusedVariants(tx, existingVariants, keepIds) {
+  for (const existing of existingVariants) {
+    if (keepIds.has(existing.id)) continue;
+    const hist = await tx.productVariant.findUnique({
+      where: { id: existing.id },
+      include: { _count: { select: { orderItems: true, barcodes: true, inventoryLedgerEvents: true } } },
+    });
+    if (!hist) continue;
+    const hasHistory =
+      hist._count.orderItems > 0 || hist._count.barcodes > 0 || hist._count.inventoryLedgerEvents > 0;
+    if (hasHistory) {
+      await tx.productVariant.update({
+        where: { id: existing.id },
+        data: { isActive: false },
+      });
+    } else {
+      await tx.productVariant.delete({ where: { id: existing.id } });
+    }
+  }
+}
+
+/**
+ * Upsert variants by publicId/sku; never wipe historical SKUs with deleteMany.
+ * Incoming rows may include `id` (publicId) and optional `isActive`.
+ */
+async function syncProductVariants(tx, product, incomingVariants) {
+  const byPublicId = new Map(product.variants.map((v) => [v.publicId, v]));
+  const bySku = new Map(product.variants.map((v) => [v.sku, v]));
+  const keepIds = new Set();
+
+  for (let i = 0; i < incomingVariants.length; i += 1) {
+    const v = incomingVariants[i];
+    const matched =
+      (v.id && byPublicId.get(String(v.id))) ||
+      (v.publicId && byPublicId.get(String(v.publicId))) ||
+      bySku.get(v.sku) ||
+      null;
+    const payload = {
+      combination: v.combination,
+      sku: v.sku,
+      stock: v.stock,
+      priceOverride: v.priceOverride ?? null,
+      memberPriceOverride: v.memberPriceOverride ?? null,
+      imageUrl: normalizeMediaUrl(v.imageUrl),
+      sortOrder: i,
+      isActive: v.isActive === false ? false : true,
+    };
+    if (matched) {
+      keepIds.add(matched.id);
+      await tx.productVariant.update({
+        where: { id: matched.id },
+        data: payload,
+      });
+    } else {
+      const created = await tx.productVariant.create({
+        data: { productId: product.id, ...payload },
+      });
+      keepIds.add(created.id);
+    }
+  }
+
+  await deactivateOrRemoveUnusedVariants(tx, product.variants, keepIds);
+}
+
+/** Keep ProductCategory join in sync with denormalized Product.categoryId (primary). */
+async function syncPrimaryProductCategory(tx, productId, categoryId) {
+  await tx.productCategory.updateMany({
+    where: { productId, categoryId: { not: categoryId } },
+    data: { isPrimary: false },
+  });
+  await tx.productCategory.upsert({
+    where: { productId_categoryId: { productId, categoryId } },
+    create: { productId, categoryId, isPrimary: true },
+    update: { isPrimary: true },
+  });
+}
 
 /**
  * Denormalized age list for fast PLP filtering. For variant products it is the
@@ -415,9 +501,18 @@ export class ProductService {
       categoryIds = categories.map((c) => c.id);
     }
 
-    const where = {};
-    if (categoryIds.length === 1) where.categoryId = categoryIds[0];
-    else if (categoryIds.length > 1) where.categoryId = { in: categoryIds };
+    const where = { deletedAt: null };
+    if (categoryIds.length === 1) {
+      where.OR = [
+        { categoryId: categoryIds[0] },
+        { categories: { some: { categoryId: categoryIds[0] } } },
+      ];
+    } else if (categoryIds.length > 1) {
+      where.OR = [
+        { categoryId: { in: categoryIds } },
+        { categories: { some: { categoryId: { in: categoryIds } } } },
+      ];
+    }
     if (!admin) {
       where.isDraft = false;
       where.isActiveListing = true;
@@ -493,7 +588,10 @@ export class ProductService {
         });
       }
       const st = status && String(status).trim() ? String(status).trim() : 'all';
-      if (st === 'active') {
+      if (st === 'deleted') {
+        delete where.deletedAt;
+        where.deletedAt = { not: null };
+      } else if (st === 'active') {
         where.isDraft = false;
         where.isActiveListing = true;
       } else if (st === 'inactive') {
@@ -539,6 +637,23 @@ export class ProductService {
           where.AND.push({ OR: or });
         }
       }
+      if (listFilters.excludeCategoryId) {
+        const excl = await prisma.category.findUnique({
+          where: { publicId: String(listFilters.excludeCategoryId) },
+          select: { id: true },
+        });
+        if (excl) {
+          where.AND = where.AND ?? [];
+          where.AND.push({
+            NOT: {
+              OR: [
+                { categoryId: excl.id },
+                { categories: { some: { categoryId: excl.id } } },
+              ],
+            },
+          });
+        }
+      }
     }
 
     let orderBy = { updatedAt: 'desc' };
@@ -577,6 +692,7 @@ export class ProductService {
           }
         : {
             variants: {
+              where: { isActive: true },
               orderBy: { sortOrder: 'asc' },
               select: {
                 publicId: true,
@@ -585,6 +701,7 @@ export class ProductService {
                 priceOverride: true,
                 memberPriceOverride: true,
                 combination: true,
+                isActive: true,
               },
             },
           }),
@@ -714,6 +831,10 @@ export class ProductService {
       throw new AppError(404, 'Product not found');
     }
 
+    if (!admin && product.deletedAt) {
+      throw new AppError(404, 'Product not found');
+    }
+
     if (!admin && (product.isDraft || !product.isActiveListing)) {
       throw new AppError(404, 'Product not found');
     }
@@ -736,8 +857,11 @@ export class ProductService {
       relatedRefurbished = await pickSellableRelatedRefurbished(product.id);
     }
 
+    const activeVariants = (product.variants || []).filter((v) => v.isActive !== false);
+
     return {
       ...product,
+      variants: activeVariants,
       relatedRefurbished,
       sourceProduct: toSourceProductPublic(product.sourceProduct),
     };
@@ -925,9 +1049,13 @@ export class ProductService {
                   memberPriceOverride: v.memberPriceOverride ?? null,
                   imageUrl: normalizeMediaUrl(v.imageUrl),
                   sortOrder: i,
+                  isActive: true,
                 })),
               }
             : undefined,
+          categories: {
+            create: [{ categoryId, isPrimary: true }],
+          },
         },
         include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
         });
@@ -1034,6 +1162,7 @@ export class ProductService {
               : gallery;
       }
 
+      let primaryCategoryChanged = false;
       if (categoryPublicId !== undefined && !isSkuCategoryLockedRefurb) {
         const category = await tx.category.findUnique({
           where: { publicId: categoryPublicId },
@@ -1043,7 +1172,20 @@ export class ProductService {
           throw new AppError(404, 'Category not found');
         }
         updatePayload.categoryId = category.id;
+        primaryCategoryChanged = category.id !== product.categoryId;
       }
+
+      const finishProductUpdate = async (data) => {
+        const next = await tx.product.update({
+          where: { id: product.id },
+          data,
+          include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+        });
+        if (primaryCategoryChanged && next.categoryId) {
+          await syncPrimaryProductCategory(tx, product.id, next.categoryId);
+        }
+        return next;
+      };
 
       if (updatePayload.sku !== undefined && updatePayload.sku !== null) {
         const other = await tx.product.findFirst({
@@ -1107,15 +1249,10 @@ export class ProductService {
           }
           delete updatePayload.stock;
           updatePayload.ageGroups = computeAgeGroups(true, product.variants);
-          return tx.product.update({
-            where: { id: product.id },
-            data: updatePayload,
-            include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-          });
+          return finishProductUpdate(updatePayload);
         }
 
         const barcodeSkuSnapshot = await snapshotVariantBarcodeSkus(tx, product.id);
-        await tx.productVariant.deleteMany({ where: { productId: product.id } });
 
         if (isVariantProduct) {
           const seen = new Set();
@@ -1136,36 +1273,25 @@ export class ProductService {
           const wasVariant =
             product.inventoryModel === 'variant_matrix' && product.variants.length > 0;
 
-          updatePayload.stock = incomingVariants.reduce((sum, v) => sum + v.stock, 0);
+          updatePayload.stock = incomingVariants.reduce((sum, v) => sum + (v.isActive === false ? 0 : v.stock), 0);
           updatePayload.inventoryModel = 'variant_matrix';
-          updatePayload.ageGroups = computeAgeGroups(true, incomingVariants);
+          updatePayload.ageGroups = computeAgeGroups(
+            true,
+            incomingVariants.filter((v) => v.isActive !== false)
+          );
 
           if (!wasVariant) {
             updatePayload.sku = await ensureUniqueParentSku(tx);
           }
 
-          const next = await tx.product.update({
-            where: { id: product.id },
-            data: {
-              ...updatePayload,
-              variants: {
-                create: incomingVariants.map((v, i) => ({
-                  combination: v.combination,
-                  sku: v.sku,
-                  stock: v.stock,
-                  priceOverride: v.priceOverride ?? null,
-                  memberPriceOverride: v.memberPriceOverride ?? null,
-                  imageUrl: normalizeMediaUrl(v.imageUrl),
-                  sortOrder: i,
-                })),
-              },
-            },
-            include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-          });
+          await syncProductVariants(tx, product, incomingVariants);
+          const next = await finishProductUpdate(updatePayload);
           await reattachVariantBarcodes(tx, product.id, barcodeSkuSnapshot);
           return next;
         }
 
+        // Switching to simple: soft-deactivate historical variants instead of hard-delete.
+        await deactivateOrRemoveUnusedVariants(tx, product.variants, new Set());
         updatePayload.inventoryModel = 'simple';
         if (data.stock !== undefined) {
           updatePayload.stock = data.stock;
@@ -1176,11 +1302,7 @@ export class ProductService {
           updatePayload.sizeAgeGroup !== undefined ? updatePayload.sizeAgeGroup : product.sizeAgeGroup
         );
 
-        return tx.product.update({
-          where: { id: product.id },
-          data: updatePayload,
-          include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-        });
+        return finishProductUpdate(updatePayload);
       }
 
       const existingIsVariant =
@@ -1202,11 +1324,7 @@ export class ProductService {
         assertProductCanActivate(preview, variantRows);
       }
 
-      return tx.product.update({
-        where: { id: product.id },
-        data: updatePayload,
-        include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
-      });
+      return finishProductUpdate(updatePayload);
     });
 
     try {
@@ -1392,13 +1510,191 @@ export class ProductService {
   }
 
   async deleteProduct(publicId) {
-    const product = await prisma.product.findUnique({ where: { publicId } });
+    const product = await prisma.product.findFirst({
+      where: { publicId, deletedAt: null },
+      include: { _count: { select: { orderItems: true } } },
+    });
 
     if (!product) {
       throw new AppError(404, 'Product not found');
     }
 
-    return prisma.product.delete({ where: { id: product.id } });
+    // Soft-delete always — preserve history for orders and inventory.
+    return prisma.product.update({
+      where: { id: product.id },
+      data: {
+        deletedAt: new Date(),
+        isActiveListing: false,
+        isDraft: false,
+      },
+    });
+  }
+
+  async restoreProduct(publicId) {
+    const product = await prisma.product.findFirst({
+      where: { publicId, deletedAt: { not: null } },
+    });
+    if (!product) {
+      throw new AppError(404, 'Deleted product not found');
+    }
+    return prisma.product.update({
+      where: { id: product.id },
+      data: { deletedAt: null, isActiveListing: false },
+    });
+  }
+
+  async generateVariantSkus(productPublicId, payload) {
+    const axes = orderVariantAxes(payload.variantAxes ?? []);
+    if (axes.length === 0) {
+      throw new AppError(400, 'Select at least one attribute with values.', 'VARIANT_AXES_EMPTY');
+    }
+
+    const product = await prisma.product.findFirst({
+      where: { publicId: productPublicId, deletedAt: null },
+      include: { variants: { orderBy: { sortOrder: 'asc' } } },
+    });
+    if (!product) {
+      throw new AppError(404, 'Product not found');
+    }
+
+    const isPipelineRefurb =
+      product.productType === 'REFURBISHED' &&
+      product.sourceProductId != null &&
+      product.sourceReturnId != null;
+    if (isPipelineRefurb) {
+      throw new AppError(
+        400,
+        'Cannot regenerate variant SKUs on a pipeline refurb listing.',
+        'REFURB_LOCKED'
+      );
+    }
+
+    const axisNames = axes.map((a) => a.name);
+    const valueArrays = axes.map((a) => a.values);
+    const combos = cartesianProduct(valueArrays);
+    if (combos.length === 0) {
+      throw new AppError(400, 'Each attribute needs at least one value.', 'VARIANT_AXES_EMPTY');
+    }
+    if (combos.length > 500) {
+      throw new AppError(
+        400,
+        'Too many combinations (over 500). Remove values or split into separate products.',
+        'VARIANT_MATRIX_TOO_LARGE'
+      );
+    }
+
+    const skuBase = buildSkuBase(product.name);
+    const byComboKey = new Map();
+    for (const v of product.variants) {
+      const key = comboKeyFromCombination(axisNames, v.combination);
+      byComboKey.set(key, v);
+    }
+    const bySku = new Map(product.variants.map((v) => [v.sku, v]));
+
+    const preserveInactive = Boolean(payload.preserveInactive);
+    let barcodesCreated = 0;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const barcodeBefore = await tx.productBarcode.count({ where: { productId: product.id } });
+      const keepIds = new Set();
+      const incomingForSync = [];
+
+      for (let i = 0; i < combos.length; i += 1) {
+        const comboValues = combos[i];
+        const combination = Object.fromEntries(axisNames.map((name, idx) => [name, comboValues[idx] ?? '']));
+        const key = comboKeyFromValues(comboValues);
+        const matched = byComboKey.get(key) ?? null;
+        const defaultSku = `${skuBase}-${skuSuffixFromCombo(comboValues)}`;
+        const sku = (matched?.sku ?? '').trim() || defaultSku;
+
+        let variantRow = matched;
+        if (!variantRow && bySku.has(sku)) {
+          variantRow = bySku.get(sku);
+        }
+
+        const preserveExisting = Boolean(variantRow);
+        const payloadRow = {
+          combination,
+          sku,
+          stock: preserveExisting ? variantRow.stock : 0,
+          priceOverride: preserveExisting ? variantRow.priceOverride : null,
+          memberPriceOverride: preserveExisting ? variantRow.memberPriceOverride : null,
+          imageUrl: preserveExisting ? variantRow.imageUrl : null,
+          isActive:
+            preserveExisting && preserveInactive && variantRow.isActive === false ? false : true,
+        };
+
+        if (variantRow) {
+          keepIds.add(variantRow.id);
+          await tx.productVariant.update({
+            where: { id: variantRow.id },
+            data: {
+              ...payloadRow,
+              imageUrl: normalizeMediaUrl(payloadRow.imageUrl),
+              sortOrder: i,
+            },
+          });
+          incomingForSync.push({ id: variantRow.publicId, ...payloadRow });
+        } else {
+          const created = await tx.productVariant.create({
+            data: {
+              productId: product.id,
+              ...payloadRow,
+              imageUrl: normalizeMediaUrl(payloadRow.imageUrl),
+              sortOrder: i,
+            },
+          });
+          keepIds.add(created.id);
+          byComboKey.set(key, created);
+          bySku.set(sku, created);
+          incomingForSync.push({ id: created.publicId, ...payloadRow });
+        }
+      }
+
+      if (!preserveInactive) {
+        await deactivateOrRemoveUnusedVariants(tx, product.variants, keepIds);
+      }
+
+      const ageGroups = computeAgeGroups(true, incomingForSync);
+      const totalStock = incomingForSync.reduce((sum, v) => sum + Number(v.stock ?? 0), 0);
+
+      const refreshed = await tx.product.update({
+        where: { id: product.id },
+        data: {
+          inventoryModel: 'variant_matrix',
+          stock: totalStock,
+          ageGroups,
+        },
+        include: { category: true, variants: { orderBy: { sortOrder: 'asc' } } },
+      });
+
+      await ensureBarcodesForProduct(product.id, tx);
+      const barcodeAfter = await tx.productBarcode.count({ where: { productId: product.id } });
+      barcodesCreated = Math.max(0, barcodeAfter - barcodeBefore);
+
+      return refreshed;
+    });
+
+    return { product: updated, barcodesCreated };
+  }
+
+  async setVariantActive(productPublicId, variantPublicId, isActive) {
+    const product = await prisma.product.findFirst({
+      where: { publicId: productPublicId, deletedAt: null },
+    });
+    if (!product) throw new AppError(404, 'Product not found');
+    const variant = await prisma.productVariant.findFirst({
+      where: { publicId: variantPublicId, productId: product.id },
+      include: { _count: { select: { orderItems: true, barcodes: true } } },
+    });
+    if (!variant) throw new AppError(404, 'Variant not found');
+    if (!isActive && variant._count.orderItems === 0 && variant._count.barcodes === 0) {
+      // Brand-new unused rows may still be deactivated rather than hard-deleted from the editor.
+    }
+    return prisma.productVariant.update({
+      where: { id: variant.id },
+      data: { isActive: Boolean(isActive) },
+    });
   }
 }
 

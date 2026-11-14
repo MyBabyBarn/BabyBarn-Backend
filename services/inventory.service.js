@@ -270,6 +270,333 @@ function productTypeWhere(productType) {
   return {};
 }
 
+const LIST_PRODUCT_INCLUDE = {
+  category: true,
+  variants: { orderBy: { sortOrder: 'asc' } },
+  sourceProduct: { select: { publicId: true, name: true, sku: true } },
+  barcodes: { select: { code: true, productVariantId: true } },
+};
+
+function buildListProductWhere({
+  search,
+  productTypeFilter,
+  categoryId,
+}) {
+  const where = {
+    isDraft: false,
+    ...productTypeWhere(
+      productTypeFilter &&
+        productTypeFilter !== 'all' &&
+        String(productTypeFilter).toUpperCase() !== 'ALL'
+        ? productTypeFilter
+        : undefined
+    ),
+  };
+
+  if (search && String(search).trim()) {
+    const q = String(search).trim();
+    where.AND = where.AND ?? [];
+    where.AND.push({
+      OR: [
+        { name: { contains: q, mode: 'insensitive' } },
+        { sku: { contains: q, mode: 'insensitive' } },
+        { variants: { some: { sku: { contains: q, mode: 'insensitive' } } } },
+        { barcodes: { some: { code: { contains: q, mode: 'insensitive' } } } },
+        {
+          barcodes: {
+            some: { aliases: { some: { code: { contains: q, mode: 'insensitive' } } } },
+          },
+        },
+      ],
+    });
+  }
+
+  if (categoryId && String(categoryId).trim() && String(categoryId) !== 'all') {
+    where.category = { publicId: String(categoryId).trim() };
+  }
+
+  return where;
+}
+
+function lineFilterParams({ stockStatus: stockStatusFilter, location, priceMin, priceMax }) {
+  const locQ =
+    location && String(location).trim() && String(location) !== 'all' ? String(location).trim() : '';
+  const minP =
+    priceMin !== undefined && priceMin !== '' && !Number.isNaN(Number(priceMin)) ? Number(priceMin) : null;
+  const maxP =
+    priceMax !== undefined && priceMax !== '' && !Number.isNaN(Number(priceMax)) ? Number(priceMax) : null;
+  return { stockStatusFilter, locQ, minP, maxP };
+}
+
+function inventoryLineMatchesFilters(line, { stockStatusFilter, locQ, minP, maxP }) {
+  if (locQ && String(line.warehouseLocation || '') !== locQ) return false;
+  if (minP != null && (line.price == null || Number(line.price) < minP)) return false;
+  if (maxP != null && (line.price == null || Number(line.price) > maxP)) return false;
+  if (!stockStatusFilter || stockStatusFilter === 'all') return true;
+  if (stockStatusFilter === 'inactive') return line.isActiveListing === false;
+  if (stockStatusFilter === 'low_stock' || stockStatusFilter === 'lowall') {
+    return line.isActiveListing !== false && line.stockStatus === 'low_stock';
+  }
+  if (stockStatusFilter === 'out_of_stock' || stockStatusFilter === 'out') {
+    return line.isActiveListing !== false && line.stockStatus === 'out_of_stock';
+  }
+  if (stockStatusFilter === 'in_stock' || stockStatusFilter === 'ok') {
+    return line.isActiveListing !== false && line.stockStatus === 'in_stock';
+  }
+  return line.stockStatus === stockStatusFilter;
+}
+
+function sortInventoryLines(lines, sortKey) {
+  const key = String(sortKey || 'name');
+  lines.sort((a, b) => {
+    if (key === 'sku') return String(a.sku).localeCompare(String(b.sku));
+    if (key === 'low') return (a.totalStock || 0) - (b.totalStock || 0);
+    if (key === 'high') return (b.totalStock || 0) - (a.totalStock || 0);
+    if (key === 'price') return (Number(b.price) || 0) - (Number(a.price) || 0);
+    return String(a.name).localeCompare(String(b.name));
+  });
+}
+
+const PRODUCT_LIST_BATCH = 80;
+
+/** Batched product reads → flattened, line-filtered SKU rows (bounded memory). */
+async function collectFilteredInventoryLines(productWhere, lineFilters) {
+  let productSkip = 0;
+  const filtered = [];
+  while (true) {
+    const rows = await prisma.product.findMany({
+      where: productWhere,
+      include: LIST_PRODUCT_INCLUDE,
+      orderBy: { updatedAt: 'desc' },
+      skip: productSkip,
+      take: PRODUCT_LIST_BATCH,
+    });
+    if (!rows.length) break;
+    productSkip += rows.length;
+    const flat = rows.flatMap((p) => flattenProductToSkuLines(p));
+    for (const line of flat) {
+      if (inventoryLineMatchesFilters(line, lineFilters)) filtered.push(line);
+    }
+  }
+  return filtered;
+}
+
+async function countSkuLinesForProductWhere(productWhere) {
+  const [variantLines, simpleLines] = await Promise.all([
+    prisma.productVariant.count({ where: { product: productWhere } }),
+    prisma.product.count({
+      where: {
+        ...productWhere,
+        variants: { none: {} },
+      },
+    }),
+  ]);
+  return variantLines + simpleLines;
+}
+
+/** @typedef {{ productPublicId: string; variantPublicId: string | null }} SkuLinePair */
+
+/**
+ * @param {object} productWhere
+ * @param {number} skip
+ * @param {number} take
+ * @returns {Promise<SkuLinePair[]>}
+ */
+async function fetchSkuLinePairsPage(productWhere, skip, take) {
+  const ids = await prisma.product.findMany({
+    where: productWhere,
+    select: { id: true },
+  });
+  if (!ids.length) return [];
+  const productIds = ids.map((p) => p.id);
+
+  const rows = await prisma.$queryRaw`
+    WITH lines AS (
+      SELECT
+        p."publicId" AS product_public_id,
+        v."publicId" AS variant_public_id,
+        p.name AS sort_name,
+        v."sortOrder" AS variant_sort,
+        1 AS kind
+      FROM "ProductVariant" v
+      INNER JOIN "Product" p ON p.id = v."productId"
+      WHERE p.id = ANY(${productIds}::int[])
+      UNION ALL
+      SELECT
+        p."publicId",
+        NULL::text,
+        p.name,
+        0,
+        0
+      FROM "Product" p
+      WHERE p.id = ANY(${productIds}::int[])
+        AND NOT EXISTS (SELECT 1 FROM "ProductVariant" pv WHERE pv."productId" = p.id)
+    )
+    SELECT product_public_id, variant_public_id
+    FROM lines
+    ORDER BY sort_name ASC, kind ASC, variant_sort ASC
+    OFFSET ${skip}
+    LIMIT ${take}
+  `;
+
+  return rows.map((r) => ({
+    productPublicId: r.product_public_id,
+    variantPublicId: r.variant_public_id ?? null,
+  }));
+}
+
+/**
+ * @param {SkuLinePair[]} pairs
+ */
+async function hydrateSkuLinePairs(pairs) {
+  const productPublicIds = [...new Set(pairs.map((p) => p.productPublicId))];
+  const products = await prisma.product.findMany({
+    where: { publicId: { in: productPublicIds } },
+    include: LIST_PRODUCT_INCLUDE,
+  });
+  const byPublicId = new Map(products.map((p) => [p.publicId, p]));
+  const linesByKey = new Map();
+  for (const product of products) {
+    for (const line of flattenProductToSkuLines(product)) {
+      linesByKey.set(line.lineKey, line);
+    }
+  }
+  const out = [];
+  for (const pair of pairs) {
+    const product = byPublicId.get(pair.productPublicId);
+    if (!product) continue;
+    const key = pair.variantPublicId
+      ? `${pair.productPublicId}:${pair.variantPublicId}`
+      : `${pair.productPublicId}:simple`;
+    const line = linesByKey.get(key);
+    if (line) out.push(line);
+  }
+  return out;
+}
+
+function overviewActivityDateFilter(from, to) {
+  /** @type {{ gte?: Date; lte?: Date }} */
+  const createdAt = {};
+  if (from) {
+    const d = new Date(`${from}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) createdAt.gte = d;
+  }
+  if (to) {
+    const d = new Date(`${to}T23:59:59.999`);
+    if (!Number.isNaN(d.getTime())) createdAt.lte = d;
+  }
+  return Object.keys(createdAt).length ? createdAt : null;
+}
+
+/**
+ * Batch overview KPIs (same shape as getProductOverview.kpis) for many products.
+ * @param {string[]} productPublicIds
+ */
+async function batchProductOverviewKpis(productPublicIds, { from = null, to = null } = {}) {
+  if (!productPublicIds.length) return new Map();
+
+  const products = await prisma.product.findMany({
+    where: { publicId: { in: productPublicIds } },
+    include: { variants: { orderBy: { sortOrder: 'asc' } } },
+  });
+  const dbIds = products.map((p) => p.id);
+
+  const ledgerAgg = await prisma.inventoryLedgerEvent.groupBy({
+    by: ['productId', 'eventType'],
+    where: { productId: { in: dbIds } },
+    _sum: { quantityDelta: true },
+  });
+
+  const ledgerByProduct = new Map();
+  for (const row of ledgerAgg) {
+    if (!ledgerByProduct.has(row.productId)) ledgerByProduct.set(row.productId, []);
+    ledgerByProduct.get(row.productId).push(row);
+  }
+
+  const activityFilter = overviewActivityDateFilter(from, to);
+  const activityByProduct = new Map();
+  if (activityFilter) {
+    const actRows = await prisma.inventoryLedgerEvent.groupBy({
+      by: ['productId'],
+      where: {
+        productId: { in: dbIds },
+        createdAt: activityFilter,
+        eventType: { notIn: ['RESERVE', 'RELEASE'] },
+      },
+      _count: { _all: true },
+    });
+    for (const row of actRows) {
+      activityByProduct.set(row.productId, row._count._all);
+    }
+  }
+
+  const returnRows = await prisma.returnRequest.findMany({
+    where: {
+      type: 'STANDARD',
+      orderItem: { productId: { in: dbIds } },
+    },
+    select: {
+      orderItem: { select: { productId: true } },
+      receivedQuantity: true,
+      disposition: true,
+      dispositionQuantity: true,
+      acceptedQuantity: true,
+    },
+  });
+
+  const returnsByProduct = new Map();
+  for (const rr of returnRows) {
+    const pid = rr.orderItem?.productId;
+    if (!pid) continue;
+    if (!returnsByProduct.has(pid)) {
+      returnsByProduct.set(pid, { totalReturned: 0, totalMovedToRefurb: 0, totalDiscarded: 0 });
+    }
+    const agg = returnsByProduct.get(pid);
+    agg.totalReturned += Math.max(0, Number(rr.receivedQuantity ?? 0));
+    const dispQty = Math.max(0, Number(rr.dispositionQuantity ?? rr.acceptedQuantity ?? 0));
+    if (rr.disposition === 'REFURB') agg.totalMovedToRefurb += dispQty;
+    if (rr.disposition === 'DISCARD') agg.totalDiscarded += dispQty;
+  }
+
+  const result = new Map();
+
+  for (const product of products) {
+    const rows = ledgerByProduct.get(product.id) || [];
+    const sumByType = Object.fromEntries(
+      rows.map((row) => [row.eventType, Math.abs(Number(row._sum.quantityDelta || 0))])
+    );
+    const signedByType = Object.fromEntries(
+      rows.map((row) => [row.eventType, Number(row._sum.quantityDelta || 0)])
+    );
+    const totalSold = sumByType.COMMIT || 0;
+    const totalRestocked = (sumByType.RESTOCK || 0) + (sumByType.REFUND_RESTORE || 0);
+    const positiveAdjust = Math.max(0, signedByType.ADJUST || 0);
+    const totalReceived = positiveAdjust + totalRestocked;
+    const ret = returnsByProduct.get(product.id) || {
+      totalReturned: 0,
+      totalMovedToRefurb: 0,
+      totalDiscarded: 0,
+    };
+    const currentAvailable = computeAvailableStock(product);
+
+    result.set(product.publicId, {
+      kpis: {
+        totalInventoryReceived: totalReceived,
+        totalSold,
+        totalReturned: ret.totalReturned,
+        totalRestocked,
+        totalMovedToRefurbishment: ret.totalMovedToRefurb,
+        totalDiscarded: ret.totalDiscarded,
+        currentAvailableInventory: currentAvailable,
+        manualAdjustments: Math.abs(Number(signedByType.ADJUST || 0)),
+      },
+      activityInRange: activityFilter ? activityByProduct.get(product.id) ?? 0 : null,
+    });
+  }
+
+  return result;
+}
+
 export class InventoryService {
   async getStats({ productType } = {}) {
     const products = await prisma.product.findMany({
@@ -319,88 +646,134 @@ export class InventoryService {
     sort = 'name',
   }) {
     const skip = (page - 1) * limit;
-
-    const where = {
-      isDraft: false,
-      ...productTypeWhere(
-        productTypeFilter &&
-          productTypeFilter !== 'all' &&
-          String(productTypeFilter).toUpperCase() !== 'ALL'
-          ? productTypeFilter
-          : undefined
-      ),
-    };
-
-    if (search && String(search).trim()) {
-      const q = String(search).trim();
-      where.AND = where.AND ?? [];
-      where.AND.push({
-        OR: [
-          { name: { contains: q, mode: 'insensitive' } },
-          { sku: { contains: q, mode: 'insensitive' } },
-          { variants: { some: { sku: { contains: q, mode: 'insensitive' } } } },
-          { barcodes: { some: { code: { contains: q, mode: 'insensitive' } } } },
-          {
-            barcodes: {
-              some: { aliases: { some: { code: { contains: q, mode: 'insensitive' } } } },
-            },
-          },
-        ],
-      });
-    }
-
-    if (categoryId && String(categoryId).trim() && String(categoryId) !== 'all') {
-      where.category = { publicId: String(categoryId).trim() };
-    }
-
-    const rows = await prisma.product.findMany({
-      where,
-      include: {
-        category: true,
-        variants: { orderBy: { sortOrder: 'asc' } },
-        sourceProduct: { select: { publicId: true, name: true, sku: true } },
-        barcodes: { select: { code: true, productVariantId: true } },
-      },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    const flat = rows.flatMap((p) => flattenProductToSkuLines(p));
-    const locQ = location && String(location).trim() && String(location) !== 'all' ? String(location).trim() : '';
-    const minP = priceMin !== undefined && priceMin !== '' && !Number.isNaN(Number(priceMin)) ? Number(priceMin) : null;
-    const maxP = priceMax !== undefined && priceMax !== '' && !Number.isNaN(Number(priceMax)) ? Number(priceMax) : null;
-
-    const filtered = flat.filter((line) => {
-      if (locQ && String(line.warehouseLocation || '') !== locQ) return false;
-      if (minP != null && (line.price == null || Number(line.price) < minP)) return false;
-      if (maxP != null && (line.price == null || Number(line.price) > maxP)) return false;
-      if (!stockStatusFilter || stockStatusFilter === 'all') return true;
-      if (stockStatusFilter === 'inactive') return line.isActiveListing === false;
-      if (stockStatusFilter === 'low_stock' || stockStatusFilter === 'lowall') {
-        return line.isActiveListing !== false && line.stockStatus === 'low_stock';
-      }
-      if (stockStatusFilter === 'out_of_stock' || stockStatusFilter === 'out') {
-        return line.isActiveListing !== false && line.stockStatus === 'out_of_stock';
-      }
-      if (stockStatusFilter === 'in_stock' || stockStatusFilter === 'ok') {
-        return line.isActiveListing !== false && line.stockStatus === 'in_stock';
-      }
-      return line.stockStatus === stockStatusFilter;
-    });
-
+    const productWhere = buildListProductWhere({ search, productTypeFilter, categoryId });
+    const lineFilters = lineFilterParams({ stockStatus: stockStatusFilter, location, priceMin, priceMax });
     const sortKey = String(sort || 'name');
-    filtered.sort((a, b) => {
-      if (sortKey === 'sku') return String(a.sku).localeCompare(String(b.sku));
-      if (sortKey === 'low') return (a.totalStock || 0) - (b.totalStock || 0);
-      if (sortKey === 'high') return (b.totalStock || 0) - (a.totalStock || 0);
-      if (sortKey === 'price') return (Number(b.price) || 0) - (Number(a.price) || 0);
-      return String(a.name).localeCompare(String(b.name));
-    });
 
-    const total = filtered.length;
-    const slice = filtered.slice(skip, skip + limit);
+    const hasLineFilters =
+      (stockStatusFilter && stockStatusFilter !== 'all') ||
+      Boolean(lineFilters.locQ) ||
+      lineFilters.minP != null ||
+      lineFilters.maxP != null;
+
+    let items;
+    let total;
+
+    if (!hasLineFilters && sortKey === 'name') {
+      total = await countSkuLinesForProductWhere(productWhere);
+      const pairs = await fetchSkuLinePairsPage(productWhere, skip, limit);
+      items = await hydrateSkuLinePairs(pairs);
+    } else {
+      const filtered = await collectFilteredInventoryLines(productWhere, lineFilters);
+      sortInventoryLines(filtered, sortKey);
+      total = filtered.length;
+      items = filtered.slice(skip, skip + limit);
+    }
 
     return {
-      items: slice,
+      items,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit) || 1,
+      },
+    };
+  }
+
+  /**
+   * Inventory overview list — one row per product with lifetime KPIs (no per-row overview N+1).
+   */
+  async listOverview({
+    page = 1,
+    limit = 24,
+    search,
+    stockStatus: stockStatusFilter,
+    productType: productTypeFilter,
+    location,
+    categoryId,
+    priceMin,
+    priceMax,
+    from = null,
+    to = null,
+  }) {
+    const skip = (page - 1) * limit;
+    const productWhere = buildListProductWhere({ search, productTypeFilter, categoryId });
+    const lineFilters = lineFilterParams({ stockStatus: stockStatusFilter, location, priceMin, priceMax });
+
+    const hasLineFilters =
+      (stockStatusFilter && stockStatusFilter !== 'all') ||
+      Boolean(lineFilters.locQ) ||
+      lineFilters.minP != null ||
+      lineFilters.maxP != null;
+
+    let productPublicIds;
+    let total;
+
+    if (!hasLineFilters) {
+      const [products, count] = await Promise.all([
+        prisma.product.findMany({
+          where: productWhere,
+          select: { publicId: true, name: true, sku: true, productType: true },
+          orderBy: { name: 'asc' },
+          skip,
+          take: limit,
+        }),
+        prisma.product.count({ where: productWhere }),
+      ]);
+      productPublicIds = products.map((p) => p.publicId);
+      total = count;
+      const summaries = await batchProductOverviewKpis(productPublicIds, { from, to });
+      const items = products.map((p) => {
+        const extra = summaries.get(p.publicId);
+        return {
+          productId: p.publicId,
+          name: p.name,
+          sku: p.sku,
+          productType: p.productType,
+          kpis: extra?.kpis ?? null,
+          activityInRange: extra?.activityInRange ?? null,
+        };
+      });
+      return {
+        items,
+        pagination: {
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit) || 1,
+        },
+      };
+    }
+
+    const filtered = await collectFilteredInventoryLines(productWhere, lineFilters);
+    const byProduct = new Map();
+    for (const line of filtered) {
+      if (!byProduct.has(line.productId)) {
+        byProduct.set(line.productId, {
+          productId: line.productId,
+          name: line.name,
+          sku: line.sku,
+          productType: line.productType,
+        });
+      }
+    }
+    const allProducts = [...byProduct.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    total = allProducts.length;
+    const pageProducts = allProducts.slice(skip, skip + limit);
+    productPublicIds = pageProducts.map((p) => p.productId);
+    const summaries = await batchProductOverviewKpis(productPublicIds, { from, to });
+    const items = pageProducts.map((p) => {
+      const extra = summaries.get(p.productId);
+      return {
+        ...p,
+        kpis: extra?.kpis ?? null,
+        activityInRange: extra?.activityInRange ?? null,
+      };
+    });
+
+    return {
+      items,
       pagination: {
         total,
         page,
@@ -563,7 +936,9 @@ export class InventoryService {
         referenceReturnNumber: e.referenceReturnNumber ?? null,
         referenceReturnType: e.referenceReturnType ?? null,
         createdAt: e.createdAt,
-        product: e.product,
+        product: e.product
+          ? { ...e.product, productType: e.product.productType ?? 'NEW' }
+          : e.product,
         variant: e.variant,
         user: e.actor ?? null,
       })),
